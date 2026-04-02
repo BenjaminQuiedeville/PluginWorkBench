@@ -1,0 +1,3 @@
+[submodule "deps/clap-odin"]
+	path = deps/clap-odin
+	url = https://github.com/MalgAmoe/clap-odin.git
