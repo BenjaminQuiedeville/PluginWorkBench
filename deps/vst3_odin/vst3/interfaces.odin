@@ -607,7 +607,7 @@ IHostApplicationVtbl :: struct #packed {
 }
 
 IHostApplication :: struct #packed {
-    using vtbl: IHostApplicationVtbl,
+    using vtbl: ^IHostApplicationVtbl,
 }
 
 IHostApplication_iid :: "58e595cc-db2d-4969-8b6a-af8c36a664e5"
