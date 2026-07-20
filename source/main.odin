@@ -7,7 +7,7 @@ import "core:dynlib"
 import "core:strings"
 import "base:runtime"
 
-// import ma "vendor:miniaudio"
+import ma "vendor:miniaudio"
 
 
 import clap "../deps/clap-odin"
@@ -45,10 +45,13 @@ clap_plugin_rescan_params :: proc "c" (host: ^clap.Host, flags: u32) {}
 clap_plugin_clean_params :: proc "c" (host: ^clap.Host, param_id: clap.Clap_Id, flags: u32) {}
 clap_plugin_request_flush :: proc "c" (host: ^clap.Host) {}
 
-main :: proc() {
-
-    plugin_path := "D:/Dev/clap/clap_ambient/build/cmake/CLAP/Debug/clap_ambient.clap"
+audio_callback :: proc "c" (pDevice: ^ma.device, pOutput, pInput: rawptr, frameCount: u32) {
     
+    device := pDevice
+}
+
+
+draft_clap_loader :: proc(plugin_path: string) {
     library, ok := dynlib.load_library(plugin_path)
     defer dynlib.unload_library(library)
     
@@ -149,8 +152,25 @@ main :: proc() {
     host_data.min_buffer_size = 8
     host_data.max_buffer_size = 128
     host_data.plugin->activate(host_data.samplerate, host_data.min_buffer_size, host_data.max_buffer_size)
- 
-    host_data.plugin->start_processing()
+
+    {
+        ma_config := ma.device_config_init(.duplex)
+        ma_config.playback.format = .f32
+        ma_config.playback.channels = 2
+        ma_config.sampleRate = 48000
+        ma_config.dataCallback = audio_callback
+        ma_config.pUserData = &host_data
+    
+        device: ma.device
+        if ma.device_init(nil, &ma_config, &device) != .SUCCESS {
+            assert(false)
+        }
+        
+        ma.device_start(&device)
+        
+        
+        ma.device_uninit(&device)
+    } 
     
     // init les audio ports 
     // créer une liste d'event avec des event de process audio
@@ -168,7 +188,14 @@ main :: proc() {
         
         
     // }
+}
+
+
+main :: proc() {
     
-    // status := host_data.plugin->process(process_context)
+    // assert(len(os.args) >= 2)
+    // plugin_path := os.args[1]
+    plugin_path := "../clap/clap_ambient/build/cmake/Debug/clap_ambient.vst3"
     
+    draft_vst3_loader(plugin_path)
 }
