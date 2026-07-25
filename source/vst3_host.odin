@@ -60,19 +60,20 @@ vst_host_vtbl := vst3.IHostApplicationVtbl {
 }
 
 
-load_vst3 :: proc(main_host: ^Plugin_Host, plugin_path: string) {
+vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) {
     
     vst_host := &main_host.vst_host
-    
-    library, ok := dynlib.load_library(plugin_path)
-    defer dynlib.unload_library(library)
+    vst_host.host_interface.vtbl = &vst_host_vtbl
+
+    ok: bool
+    main_host.dll_handle, ok = dynlib.load_library(plugin_path)
     
     if !ok {
         fmt.println(dynlib.last_error())
         return
     }
 
-    address, found := dynlib.symbol_address(library, "InitDll")
+    address, found := dynlib.symbol_address(main_host.dll_handle, "InitDll")
 
     if !found {
         fmt.println("Procedure address not found")
@@ -86,7 +87,7 @@ load_vst3 :: proc(main_host: ^Plugin_Host, plugin_path: string) {
     }
     
     
-    address, found = dynlib.symbol_address(library, "GetPluginFactory")
+    address, found = dynlib.symbol_address(main_host.dll_handle, "GetPluginFactory")
 
     if !found {
         fmt.println("Procedure address not found")
@@ -95,6 +96,7 @@ load_vst3 :: proc(main_host: ^Plugin_Host, plugin_path: string) {
     
     get_fact_proc := cast(VST3_Get_Factory_Proc)address
     vst_factory: ^vst3.IPluginFactory3 = get_fact_proc()
+    defer vst_factory->release()
     
     assert(vst_factory != nil)        
     
@@ -116,7 +118,7 @@ load_vst3 :: proc(main_host: ^Plugin_Host, plugin_path: string) {
     assert(result == .Ok)
     
     
-    result = vst_host.component_interface->initialize(transmute(^vst3.FUnknown)(&vst_host.host_context))
+    result = vst_host.component_interface->initialize(transmute(^vst3.FUnknown)(&vst_host.host_interface))
     assert(result == .Ok) 
     
 
@@ -130,7 +132,7 @@ load_vst3 :: proc(main_host: ^Plugin_Host, plugin_path: string) {
                                               transmute(^rawptr)&vst_host.editor_interface)
         
         if result == .Ok {
-            result = vst_host.editor_interface->initialize(transmute(^vst3.FUnknown)(&vst_host.host_context))
+            result = vst_host.editor_interface->initialize(transmute(^vst3.FUnknown)(&vst_host.host_interface))
             
             assert(result == .Ok)
         
@@ -138,8 +140,8 @@ load_vst3 :: proc(main_host: ^Plugin_Host, plugin_path: string) {
     
     } else {
         // single component (clap-wrapper does this)
-        result = vst_host.editor_interface->initialize(transmute(^vst3.FUnknown)&vst_host.host_context)
-        assert(result == .Ok)
+        // result = vst_host.editor_interface->initialize(transmute(^vst3.FUnknown)&vst_host.host_interface)
+        // assert(result == .Ok)
     
     }
     
@@ -148,11 +150,16 @@ load_vst3 :: proc(main_host: ^Plugin_Host, plugin_path: string) {
     result = vst_host.component_interface->query_interface(raw_data(audio_processor_iid[:]), 
                                                            transmute(^rawptr)&vst_host.audio_proc_interface)
     
-    
+}
+
+vst_prepare_plugin_process :: proc(vst_host: ^Vst_Host, samplerate: f64, buffer_size: i32) {
+
+    result: vst3.Result
+
     process_setup := vst3.ProcessSetup { process_mode = i32(vst3.ProcessMode.Realtime), 
                                          symbolic_sample_size = i32(vst3.SymbolicSampleSize.Sample32), 
-                                         max_samples_per_block = 128, 
-                                         sample_rate = vst_host.samplerate }
+                                         max_samples_per_block = buffer_size,
+                                         sample_rate = samplerate }
     
     vst_host.audio_proc_interface->setup_processing(&process_setup)
     
@@ -167,51 +174,20 @@ load_vst3 :: proc(main_host: ^Plugin_Host, plugin_path: string) {
     
     vst_host.component_interface->set_active(u8(true))
     vst_host.audio_proc_interface->set_processing(u8(true))
-    
-    
-    audio_data := make([]f32, process_setup.max_samples_per_block * 2)
-    defer delete(audio_data)
-    audio_channels := [][^]f32 {raw_data(audio_data[0:][:len(audio_data)/2]), raw_data(audio_data[len(audio_data)/2:])}
-    
-    audio_data[0] = 1.0
-    
-    audio_buffer := vst3.AudioBusBuffers {
-        num_channels = 2,
-        silence_flags = 0,
-        buffers_32 = raw_data(audio_channels[:])
-    }
-    
-    
-    process_context := vst3.ProcessContext {
-        state = 0,
-        sample_rate = process_setup.sample_rate,
-    }
-    
-    process_data := vst3.ProcessData {
-        process_mode = vst3.ProcessMode(process_setup.process_mode),
-        symbolic_sample_size = vst3.SymbolicSampleSize(process_setup.symbolic_sample_size),
-        num_samples = process_setup.max_samples_per_block,
-        num_inputs = 2,
-        num_outputs = 2,
-        inputs = &audio_buffer,
-        outputs = &audio_buffer,
-        inputParameterChanges = nil, //  ^IParameterChanges,
-        outputParameterChanges = nil, // ^IParameterChanges,
-        input_events = nil, // ^IEventList,
-        output_events = nil, // ^IEventList,
-        process_context = &process_context,
-    }
-    
-    vst_host.audio_proc_interface->process(&process_data)
-    
-    
-    vst_host.audio_proc_interface->release()
-    vst_host.editor_interface->terminate()
-    vst_host.editor_interface->release()    
-    vst_host.component_interface->terminate()
-    vst_host.component_interface->release()
-    vst_factory->release()
+
 }
 
 
-close_vst :: proc()
+vst_close_plugin :: proc(main_host: ^Plugin_Host) {
+
+    main_host.vst_host.audio_proc_interface->set_processing(u8(false))
+    main_host.vst_host.component_interface->set_active(u8(false))
+    
+    main_host.vst_host.audio_proc_interface->release()
+    main_host.vst_host.editor_interface->terminate()
+    main_host.vst_host.editor_interface->release()    
+    main_host.vst_host.component_interface->terminate()
+    main_host.vst_host.component_interface->release()
+
+    dynlib.unload_library(main_host.dll_handle)
+}
