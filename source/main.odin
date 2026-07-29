@@ -1,6 +1,7 @@
 package PluginWorkBench
 
 import "base:runtime"
+import intrin "base:intrinsics"
 
 import "core:fmt"
 import "core:c"
@@ -10,6 +11,7 @@ import "core:strings"
 import "core:time"
 import "core:flags"
 import "core:mem"
+import vmem "core:mem/virtual"
 
 import vst3 "../deps/vst3_odin/vst3"
 
@@ -41,13 +43,19 @@ Audio_Thread_Status :: enum {
     RequestToStop,
 }
 
-audio_callback :: proc "c" (device: ^ma.device, output: rawptr, input: rawptr, nsamples: u32) {
-    
+Plugin_Type :: enum {
+    Vst,
+    Clap, 
+    // Faust,
+    // OdinPlug,
+}
+
+audio_callback :: proc "c" (device: ^ma.device, output: rawptr, input: rawptr, nsamples: u32) {    
     context = runtime.default_context()
     
     host := transmute(^Plugin_Host)device.pUserData
 
-    if (host.audio_thread_status == .Stopped || host.audio_thread_status == .RequestToStop) { 
+    if intrin.atomic_load(&host.audio_thread_status) != .Running { 
         return 
     }
 
@@ -93,7 +101,7 @@ audio_callback :: proc "c" (device: ^ma.device, output: rawptr, input: rawptr, n
     }
     
     
-    vst_result := host.vst_host.audio_proc_interface->process(&process_data)
+    vst_result := host.vst_host.audio_proc->process(&process_data)
     assert(vst_result == .Ok)
 
     
@@ -110,10 +118,25 @@ audio_callback :: proc "c" (device: ^ma.device, output: rawptr, input: rawptr, n
     }
 
     if read_frames_result == .AT_END {
-        host.audio_thread_status = .RequestToStop
+        intrin.atomic_store(&host.audio_thread_status, .RequestToStop)
     }
 }
 
+
+from_u16_array_to_string16 :: proc(chars: []u16) -> string16 {
+    string_size := 0
+    
+    for char, index in chars {
+        if char == 0 {
+            break;
+        }
+        string_size += 1
+    }
+    
+    if string_size == 0 { return "" }
+    
+    return string16(chars[:string_size])
+}
 
 main :: proc() {
         
@@ -126,6 +149,17 @@ main :: proc() {
     
 
     /*
+        - ce que je veux faire pendant les vacances dans l'ordre pour vst3 : 
+        avoir un gui qui load un fichier, qui permet de faire play pause dans la lecture (en laissant tourner le dsp)
+        afficher les paramètres du plugin dans un layout générique
+        prendre le nom du plugin et du fichier audio dans les arguments de command line
+        afficher le gui du plugin
+        (avec tout ca j'ai de quoi développer pas mal)
+        ploter le signal de sortie 
+        
+        une fois que je peux faire ca pour vst3, refactorer pour abstraire et refaire avec clap, puis avec Faust ?
+        
+
         grosse struct avec toutes les données
         dans cette struct, les sous-struct dépendant des backends (clap, vst, odin, faust)
         
@@ -165,6 +199,13 @@ main :: proc() {
         }
         
     */
+    
+    arena: vmem.Arena
+    arena_err := vmem.arena_init_growing(&arena)
+    assert(arena_err == nil)
+    
+    context.allocator = vmem.arena_allocator(&arena)
+    defer vmem.arena_destroy(&arena)
     
     host: Plugin_Host
     host.samplerate = 48000.0
@@ -211,7 +252,6 @@ main :: proc() {
         delete(host.audio_buffer[0])
         delete(host.audio_buffer[1])
     }
-
     
     decoder_config := ma.decoder_config_init(.f32, 1, 48000)
     ma_result = ma.decoder_init_file(test_audio_filepath, &decoder_config, &host.wav_decoder)
@@ -223,18 +263,38 @@ main :: proc() {
 
     vst_prepare_plugin_process(&host.vst_host, host.samplerate, i32(host.buffer_size))
 
-    host.audio_thread_status = .Running    
-    ma.device_start(&host.audio_device)
-
-
-    for host.audio_thread_status != .RequestToStop {
-        time.sleep(100 * time.Millisecond)
+    when false {
+        host.audio_thread_status = .Running    
+        ma.device_start(&host.audio_device)
+    
+    
+        for intrin.atomic_load(&host.audio_thread_status) != .RequestToStop {
+            time.sleep(100 * time.Millisecond)
+        }
+        
+        host.audio_thread_status = .Stopped
+        ma_result = ma.device_stop(&host.audio_device)
     }
     
-    host.audio_thread_status = .Stopped
-    ma_result = ma.device_stop(&host.audio_device)
-    
-    device_state := ma.device_get_state(&host.audio_device)
+
+    {
+        // print tous les params
+        vst_host := &host.vst_host
+        
+        num_params := vst_host.editor->get_parameter_count()
+        
+        for index in 0..<num_params {
+            info: vst3.ParameterInfo
+            result := vst_host.editor->get_parameter_info(index, &info)
+            
+            fmt.println(info.id, " - ", 
+                        from_u16_array_to_string16(info.title[:]), " - ", 
+                        from_u16_array_to_string16(info.short_title[:]), " - ",
+                        from_u16_array_to_string16(info.units[:]), " - ", 
+                        info.default_normalised_value)
+        }
+            
+    }
     
     vst_close_plugin(&host)
 

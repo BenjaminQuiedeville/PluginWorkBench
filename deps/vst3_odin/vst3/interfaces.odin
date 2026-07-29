@@ -391,7 +391,7 @@ IConnectionPointVtbl :: struct #packed {
 }
 
 IConnectionPoint :: struct #packed {
-    using vtbl: ^IConnectionPoint,
+    using vtbl: ^IConnectionPointVtbl,
 }
 
 IConnectionPoint_iid :: "70a4156f-6e6e-4026-9891-48bfaa60d8d1"
