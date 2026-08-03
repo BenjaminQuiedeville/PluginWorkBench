@@ -22,3 +22,17 @@ build_working_dir:      %PROJECT_CONFIG_DIR%
 key_binding:            F5
 
 
+[Debug Build & Run AmpModeler]   # <- command name. Can be arbitrary
+build_command:          odin build Source -debug -out:bench.exe
+build_working_dir:      %PROJECT_CONFIG_DIR%
+run_command:            bench.exe -plugin:./test_files/AmpModeler/AmpModeler.vst3/Contents/x86_64-win/AmpModeler.vst3 -audio-file:test_files/Deliverance2DI.wav
+# timeout_in_seconds:     5             # if you don't want a timeout, don't specify it
+key_binding:            F6
+
+[Debug Build & Run clap_ambient]   # <- command name. Can be arbitrary
+build_command:          odin build Source -debug -out:bench.exe
+build_working_dir:      %PROJECT_CONFIG_DIR%
+run_command:            bench.exe -plugin:./test_files/clap_ambient/clap_ambient.vst3 -audio-file:test_files/Deliverance2DI.wav
+# timeout_in_seconds:     5             # if you don't want a timeout, don't specify it
+key_binding:            F7
+
