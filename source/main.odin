@@ -12,7 +12,6 @@ import "core:time"
 import "core:flags"
 import "core:mem"
 import vmem "core:mem/virtual"
-import "core:log"
 
 import vst3 "../deps/vst3_odin/vst3"
 
@@ -309,17 +308,44 @@ main :: proc() {
 
     plugin_path := arguments.plugin_path
     test_audio_filepath := arguments.test_audio_file_path
+    binary_path := ""
+    plugin_extension := ""
+
+    dir, plugin_filename := os.split_path(plugin_path)
+    plugin_filename, plugin_extension = os.split_filename(plugin_filename)
     
-    if strings.has_suffix(plugin_path, ".vst3") { plugin_type = .Vst }
-    else if strings.has_suffix(plugin_path, ".clap") { plugin_type = .Clap }
-    else { 
-        fmt.println("[Error] Plugin type     not implemented") 
-        return
+    switch plugin_extension {    
+        case "vst3": { 
+            if os.is_directory(plugin_path) {
+                
+                when ODIN_OS == .Windows {
+                    binary_path = fmt.aprint(plugin_path, "/Contents/x86_64-win/", plugin_filename, ".vst3", sep = "")
+                }
+                else when ODIN_OS == .Darwin {
+                    binary_path = fmt.aprint(plugin_path, "/Contents/MacOS/", plugin_filename, sep = "")
+                }
+                else when ODIN_OS == .Linux {
+                    binary_path = fmt.aprint(plugin_path, "/Contents/x86_64-linux/", plugin_filename, ".so", sep = "")
+                }
+            } else {
+                binary_path = plugin_path
+            }
+            plugin_type = .Vst 
+        }
+        case "clap": {
+            plugin_type = .Clap 
+            unimplemented("CLAP loader not yet implemented")
+        }
+        case: {
+            unimplemented("Plugin type not supported")
+        }
     }
-            
+    
+                
     host: Plugin_Host
     host.samplerate = 48000.0
     
+    // miniaudio init
     ma_result: ma.result
 
     ma_context: ma.context_type
@@ -355,19 +381,14 @@ main :: proc() {
     assert(ma_result == .SUCCESS)
 
     host.buffer_size = host.audio_device.playback.internalPeriodSizeInFrames
-
     host.audio_buffer = { make([]f32, host.buffer_size), make([]f32, host.buffer_size) }
-    defer {
-        delete(host.audio_buffer[0])
-        delete(host.audio_buffer[1])
-    }
     
     decoder_config := ma.decoder_config_init(.f32, 1, 48000)
     ma_result = ma.decoder_init_file(strings.clone_to_cstring(test_audio_filepath), &decoder_config, &host.wav_decoder)
     assert(ma_result == .SUCCESS, "Could not init wav decoder")
     defer ma.decoder_uninit(&host.wav_decoder)
 
-
+    // raylib init
     window_width :: 1200
     window_height :: 800
     
@@ -388,21 +409,15 @@ main :: proc() {
     rl.GuiSetFont(gui_font)
     rl.GuiSetStyle(.DEFAULT, i32(rl.GuiDefaultProperty.TEXT_SIZE), 14)
         
-    
-    res := vst_load_plugin(&host, plugin_path)
+    // plugin load and init     
+    res := vst_load_plugin(&host, binary_path)
     if res != .OK {
         fmt.println("Error during plugin loading Exiting")
         return 
     }
 
-
     vst_prepare_plugin_process(&host.vst_host, host.samplerate, i32(host.buffer_size))
-
     vst_get_parameter_infos(&host)
-
-    host.audio_thread_status = .Running
-    host.audio_file_status = .Playing
-    ma.device_start(&host.audio_device)
 
     num_params := host.vst_host.editor->get_parameter_count()    
     for index in 0..<num_params {
@@ -415,12 +430,10 @@ main :: proc() {
                     u16_array_to_string16(info.units[:]), " - ", 
                     info.default_normalised_value)
     }
-    // value_string : [128]u16
-    // host.vst_host.editor->get_parameter_string_by_value(1456933091, 3.0/4.0, raw_data(value_string[:]))
 
-    // real_value := host.vst_host.editor->normalised_param_to_plain(95466697, 0.1)
-    // fmt.println("real value: ", real_value)
-
+    host.audio_thread_status = .Running
+    host.audio_file_status = .Playing
+    ma.device_start(&host.audio_device)
 
     button_pressed: bool
     slider_value: f32 = 0.0
@@ -446,7 +459,7 @@ main :: proc() {
             
             rl.ClearBackground(rl.RAYWHITE)
             
-            button_pressed = rl.GuiButton({10, 20, 150, 40}, "Play")
+            button_pressed = rl.GuiButton({10, 20, 150, 40}, "#131#Play")
             
 
             // if cast(bool)rl.GuiDropdownBox({210, 100, 100, 40}, "44100;48000;96000", &combo_box_active, combo_box_edit) { combo_box_edit = !combo_box_edit }
@@ -486,15 +499,13 @@ main :: proc() {
                         head := intrin.atomic_load(&fifo.head)
                         tail := intrin.atomic_load(&fifo.tail)
                         
-                        // if head != tail {
                         fifo.events[head] = { param.id, f64(param.current_value_norm) }
                         head += 1
                         head &= (VALUE_QUEUE_LENGTH-1)
                         
                         intrin.atomic_store(&fifo.head, head)
-                        // }             
 
-                        // host.vst_host.editor->set_param_normalised(param.id, f64(param.current_value_norm))
+                        host.vst_host.editor->set_param_normalised(param.id, f64(param.current_value_norm))
                     }
                                         
                     slider_pos.y += 30
@@ -519,11 +530,9 @@ main :: proc() {
 
     host.audio_thread_status = .Stopped
     ma_result = ma.device_stop(&host.audio_device)
-    
-    
-    
-    vst_close_plugin(&host)
-
     // ma.device_uninit(&host.audio_device)
     // ma.context_uninit(&ma_context)
+        
+    vst_close_plugin(&host)
+
 }
