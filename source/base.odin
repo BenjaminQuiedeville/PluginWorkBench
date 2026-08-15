@@ -1,5 +1,6 @@
 package PluginWorkBench
 
+import rl "vendor:raylib"
 
 Result :: enum {
     OK,
@@ -50,4 +51,9 @@ u16_array_to_string16 :: proc(chars: []u16) -> string16 {
     if string_size == 0 { return "" }
     
     return string16(chars[:string_size])
+}
+
+
+rect_to_i32_args :: proc(rect: rl.Rectangle) -> (i32, i32, i32, i32) {
+    return i32(rect.x), i32(rect.y), i32(rect.width), i32(rect.height)
 }

@@ -225,17 +225,6 @@ audio_callback :: proc "c" (device: ^ma.device, output: rawptr, input: rawptr, n
 }
 
 /*
-    - ce que je veux faire pendant les vacances dans l'ordre pour vst3 : 
-    avoir un gui qui load un fichier, qui permet de faire play pause dans la lecture (en laissant tourner le dsp)
-    afficher les paramètres du plugin dans un layout générique
-    prendre le nom du plugin et du fichier audio dans les arguments de command line
-    afficher le gui du plugin
-    (avec tout ca j'ai de quoi développer pas mal)
-    ploter le signal de sortie 
-    
-    une fois que je peux faire ca pour vst3, refactorer pour abstraire et refaire avec clap, puis avec Faust ?
-    
-
     grosse struct avec toutes les données
     dans cette struct, les sous-struct dépendant des backends (clap, vst, odin, faust)
     
@@ -276,10 +265,11 @@ audio_callback :: proc "c" (device: ^ma.device, output: rawptr, input: rawptr, n
     
 */
 
-Command_Line_Args :: struct {
-    
-    plugin_path: string  `args:"name=plugin"`,
-    test_audio_file_path: string `args:"name=audio-file"`,
+Command_Line_Arguments :: struct {
+    plugin_path: string          `args:"name=plugin" usage:"The plugin do open"`,
+    test_audio_file_path: string `args:"name=audio-file" usage:"The audio file to use with the plugin"`,
+    run_audio: bool              `args:"name=run-audio" usage:"Sets the audio processing to begin directly"`, 
+    show_plugin_gui: bool        `args:"name=show-plugin-gui" usage: "To automaticaly show the plugin gui"`,
 }
 
 
@@ -291,7 +281,6 @@ main :: proc() {
     // plugin_path := "W:/AmpModeler/build/AmpModeler_artefacts/Debug/VST3/AmpModeler.vst3/Contents/x86_64-win/AmpModeler.vst3"
     // test_audio_filepath : cstring = "Deliverance2 DI.wav"
 
-    plugin_type: Plugin_Type
     
     arena: vmem.Arena
     arena_err := vmem.arena_init_growing(&arena)
@@ -299,20 +288,24 @@ main :: proc() {
     context.allocator = vmem.arena_allocator(&arena)
     defer vmem.arena_destroy(&arena)
 
-    arguments: Command_Line_Args
-
+    arguments: Command_Line_Arguments
     err := flags.parse(&arguments, os.args[1:])
+
+    flags.write_usage(os.to_stream(os.stdout), Command_Line_Arguments)
+
     
     fmt.println("plugin_path: ", arguments.plugin_path)
     fmt.println("audio-file: ", arguments.test_audio_file_path)
 
     plugin_path := arguments.plugin_path
     test_audio_filepath := arguments.test_audio_file_path
-    binary_path := ""
     plugin_extension := ""
 
     dir, plugin_filename := os.split_path(plugin_path)
     plugin_filename, plugin_extension = os.split_filename(plugin_filename)
+
+    binary_path := ""
+    plugin_type: Plugin_Type
     
     switch plugin_extension {    
         case "vst3": { 
@@ -435,19 +428,28 @@ main :: proc() {
     host.audio_file_status = .Playing
     ma.device_start(&host.audio_device)
 
-    button_pressed: bool
-    slider_value: f32 = 0.0
-    slider_value_int: c.int = 0
-    combo_box_active: c.int = 0
-    combo_box_edit := false
+    rewind_button_pressed: bool
+    samplerate_box_active: i32 = 1
+    samplerate_box_edit := false
     panel_scroll := rl.Vector2 { 0, 0 }
     
+
+    input_select_active: i32
+    input_select_edit: bool = false
+    
+    info_panel_pos := rl.Rectangle {0, 0, 300, 150}
+    input_panel_pos := rl.Rectangle {info_panel_pos.width, 0, window_width-info_panel_pos.width, info_panel_pos.height}
+    plugin_param_pos := rl.Rectangle {0, info_panel_pos.height, 450, window_height-info_panel_pos.height}
+    scopes_pos := rl.Rectangle {plugin_param_pos.width, plugin_param_pos.y, window_width-plugin_param_pos.x, window_height-info_panel_pos.height}
+
+    
+    scope_box_active: i32
+    scope_box_edit: bool = false
     
     for !rl.WindowShouldClose() {
     
-        // Handle GUI state update and events     
-    
-        if button_pressed {
+        // Handle GUI state update and events         
+        if rewind_button_pressed {
             
             intrin.atomic_store(&host.audio_file_status, .RequestRewind)
         }
@@ -459,25 +461,21 @@ main :: proc() {
             
             rl.ClearBackground(rl.RAYWHITE)
             
-            button_pressed = rl.GuiButton({10, 20, 150, 40}, "#131#Play")
-            
-
-            // if cast(bool)rl.GuiDropdownBox({210, 100, 100, 40}, "44100;48000;96000", &combo_box_active, combo_box_edit) { combo_box_edit = !combo_box_edit }
 
             slider_height :: 20
             margin :: 10
             panel_view: rl.Rectangle
-            panel_rect := rl.Rectangle {0, 150, 450, 400}
-            panel_content_rect := rl.Rectangle {0, 0, panel_rect.width, f32(len(host.parameters)*(slider_height + margin))}
-            value_text_padding :: 100
+            panel_content_rect := rl.Rectangle {0, 0, plugin_param_pos.width, f32(len(host.parameters)*(slider_height + margin))}
+            value_text_padding :: 85
             slider_pos := [2]f32{5.0 + value_text_padding, 30.0}
             
             value_text_buffer: [128]u8
             value_text_buffer_w: [128]u16
             
-            rl.GuiScrollPanel(panel_rect, "Parameter Panel", panel_content_rect, &panel_scroll, &panel_view)
+            rl.GuiScrollPanel(plugin_param_pos, "Parameter Panel", panel_content_rect, &panel_scroll, &panel_view)
             {
-                rl.BeginScissorMode(i32(panel_view.x), i32(panel_view.y), i32(panel_view.width), i32(panel_view.height))
+                rl.BeginScissorMode(rect_to_i32_args(panel_view))
+                defer rl.EndScissorMode()
                 
                 for &param, param_index in host.parameters {
                 
@@ -487,8 +485,8 @@ main :: proc() {
                     value_unit_string := rl.TextFormat("%s %s", cast(cstring)raw_data(value_text_buffer[:]), param.unit)
                     
                     old_value := param.current_value_norm
-                    rl.GuiSliderBar({panel_rect.x + panel_scroll.x + slider_pos.x, 
-                                    panel_rect.y + panel_scroll.y + slider_pos.y, 
+                    rl.GuiSliderBar({plugin_param_pos.x + panel_scroll.x + slider_pos.x, 
+                                    plugin_param_pos.y + panel_scroll.y + slider_pos.y, 
                                     200, 20}, 
                                     value_unit_string, 
                                     param.label, &param.current_value_norm, 0.0, 1.0)
@@ -509,18 +507,78 @@ main :: proc() {
                     }
                                         
                     slider_pos.y += 30
+                }                                
+            }
+            
+            {
+                rl.GuiPanel(scopes_pos, "scopes")
+                
+                switch scope_box_active {
+                    case 0: {
+                        rl.GuiLabel({scopes_pos.x +5, scopes_pos.y + 30, 100, 20}, "Scope panel")
+                    }
+                    case 1: {
+                        rl.GuiLabel({scopes_pos.x +5, scopes_pos.y + 30, 100, 20}, "FFT panel")
+                    }
+                    case 2: {
+                        rl.GuiLabel({scopes_pos.x +5, scopes_pos.y + 30, 100, 20}, "Spectrogram panel")
+                    }
+                    case 3: {
+                        rl.GuiLabel({scopes_pos.x +5, scopes_pos.y + 30, 100, 20}, "Freq response panel")
+                    }
+                    case 4: {
+                        rl.GuiLabel({scopes_pos.x +5, scopes_pos.y + 30, 100, 20}, "Phase response panel")
+                    }
+                    case: {
+                        unreachable()
+                    }
                 }
-                                
-                rl.EndScissorMode()
+
+                if cast(bool)rl.GuiDropdownBox({scopes_pos.x + 80, scopes_pos.y+2, 150, 20}, "#124#scope;#189#spectrum;#189#spectrogram;#125#freq response;#125#phase response", &scope_box_active, scope_box_edit) { 
+                    scope_box_edit = !scope_box_edit 
+                }
+                        
             }
 
-
-            status_bar_height :: f32(40)
-            status_bar_y :: f32(window_height - status_bar_height) 
+            { // draw master settings window
+                rl.GuiPanel(info_panel_pos, "top panel")
+                if cast(bool)rl.GuiDropdownBox({5, info_panel_pos.y + 30, 100, 30}, "44100;48000;96000", &samplerate_box_active, samplerate_box_edit) { 
+                    samplerate_box_edit = !samplerate_box_edit 
+                }
+                
+            }
             
-            status_str := rl.TextFormat("Samplerate: %d Hz | Buffer Size: %d | Plugin: %s", 
-                                        int(host.samplerate), host.buffer_size, host.vst_host.plugin_class_infos[0].name)
-            rl.GuiStatusBar({0, status_bar_y, f32(window_width), status_bar_height}, status_str)
+            { // draw input settings
+                rl.GuiPanel(input_panel_pos, "input settings")
+                
+                switch input_select_active {
+                    case 0: {
+                        rewind_button_pressed = rl.GuiButton({input_panel_pos.x+5, input_panel_pos.y+30 + 30 +5, 100, 30}, "#131#Play")
+                    }
+                    case 1: {
+                        rl.GuiLabel({input_panel_pos.x+5, input_panel_pos.y+30 + 30 +5, 100, 20}, "ADC window")
+                    }
+                    case 2: {
+                        rl.GuiLabel({input_panel_pos.x+5, input_panel_pos.y+30 + 30 +5, 100, 20}, "Synth window")
+                    }
+                    case: {
+                        unreachable()
+                    }
+                }
+
+                if cast(bool)rl.GuiDropdownBox({input_panel_pos.x+100, input_panel_pos.y+2, 80, 20}, "Sample;ADC;Synth", &input_select_active, input_select_edit) {
+                    input_select_edit = !input_select_edit
+                }
+
+
+            }
+
+            // status_bar_height :: f32(40)
+            // status_bar_y :: f32(window_height - status_bar_height) 
+            
+            // status_str := rl.TextFormat("Samplerate: %d Hz | Buffer Size: %d | Plugin: %s", 
+            //                             int(host.samplerate), host.buffer_size, host.vst_host.plugin_class_infos[0].name)
+            // rl.GuiStatusBar({0, status_bar_y, f32(window_width), status_bar_height}, status_str)
     
         }
         
