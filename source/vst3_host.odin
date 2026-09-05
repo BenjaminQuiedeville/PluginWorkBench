@@ -64,13 +64,14 @@ Vst_Host :: struct {
     connection_point: Vst_Connection_Point,
 
     plugin_class_infos: []vst3.PClassInfo,
+    factory_infos: vst3.PFactoryInfo,
     
     parameter_updater: Vst_Parameter_Changes
 }
 
 host_query_interface :: proc "system" (this: rawptr, iid: [^]u8, obj: ^rawptr) -> vst3.Result { 
     
-    context = runtime.default_context()
+    context = set_odin_context()
     
     host_app_uuid, _ := vst3.parse_uuid(vst3.IHostApplication_iid)
     audio_processor_uuid, _ := vst3.parse_uuid(vst3.IAudioProcessor_iid)
@@ -114,7 +115,7 @@ param_value_queue_vtbl := vst3.IParamValueQueueVtbl {
     },
         
     get_point = proc "system" (this: rawptr, index: i32, sample_offset: ^i32, value: ^f64) -> vst3.Result {
-        context = runtime.default_context()
+        context = set_odin_context()
         param_queue := transmute(^Vst_Value_Queue)this
     
         if index < 0 { return .InvalidArgument }
@@ -171,7 +172,7 @@ comp_handler_vtbl := vst3.IComponentHandlerVtbl {
 // host_connection_point_vtbl := vst3.IConnectionPointVtbl {    
 // // probably unused
 //     query_interface = proc "system" (this: rawptr, iid: [^]u8, obj: ^rawptr) -> vst3.Result {
-//         context = runtime.default_context()
+//         context = set_odin_context()
         
 //         // the plugin is querying its own processor
 //         connection_point := transmute(^Vst_Connection_Point)this
@@ -267,7 +268,7 @@ vst_host_vtbl := vst3.IHostApplicationVtbl {
     },
 
     create_instance = proc "system" (this: rawptr, class_id: [^]u8, iid: [^]u8, msg: ^rawptr) -> vst3.Result {
-        context = runtime.default_context() 
+        context = set_odin_context() 
                
         // message_iid, _ := vst3.parse_uuid(vst3.IMessage_iid)
         
@@ -335,6 +336,7 @@ vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result 
     
     num_classes := vst_factory->count_classes()
     
+    vst_factory->get_factory_info(&vst_host.factory_infos)
     vst_host.plugin_class_infos = make([]vst3.PClassInfo, num_classes)
     for index in 0..<num_classes {
         vst_factory->get_class_info(index, &vst_host.plugin_class_infos[index])
@@ -421,6 +423,12 @@ vst_get_parameter_infos :: proc(host: ^Plugin_Host, allocator := context.allocat
     
     }
 }
+
+vst_update_processing_setup :: proc(vst_host: ^Vst_Host, samplerate: f64, buffer_size: i32) {
+    
+    unimplemented()
+}
+
 
 vst_prepare_plugin_process :: proc(vst_host: ^Vst_Host, samplerate: f64, buffer_size: i32) {
 
