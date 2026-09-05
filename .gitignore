@@ -5,3 +5,5 @@
 *.clap
 .vs
 test_files/
+
+*.obj
