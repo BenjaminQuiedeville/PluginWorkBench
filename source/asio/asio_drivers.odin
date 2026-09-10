@@ -1,5 +1,7 @@
 package asio
 
+import "core:c"
+
 foreign import lib "asio.lib"
 
 // utility to list and load a driver before launching the ASIO machinery
@@ -10,7 +12,7 @@ foreign lib {
     @(link_name = "c_asioDrivers")
     asioDrivers: rawptr
     
-    // theAsioDriver: rawptr
+    theAsioDriver: rawptr
 
     @(link_name = "AsioDrivers_allocate")
     driversAllocate :: proc() -> rawptr ---
@@ -22,11 +24,11 @@ foreign lib {
     getCurrentDriverName :: proc(this: rawptr, name: cstring) -> bool ---
     
     // the names have to be preallocated (32 characters max)
-    getDriverNames :: proc(this: rawptr, names: [^]cstring, maxDrivers: i32) -> i32 ---
+    getDriverNames :: proc(this: rawptr, names: [^]cstring, maxDrivers: c.long) -> c.long ---
     
     loadDriver :: proc(this: rawptr, name: cstring) -> bool ---
     
     removeCurrentDriver :: proc(this: rawptr) ---
     
-    getCurrentDriverIndex :: proc(this: rawptr) -> i32 ---
+    getCurrentDriverIndex :: proc(this: rawptr) -> c.long ---
 }

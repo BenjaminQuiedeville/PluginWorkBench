@@ -119,6 +119,7 @@ Asio_Backend :: struct {
     driver_names: [8]cstring,
     ndrivers: i32,
 
+    drivers: rawptr,
     audio_device: ^ma.device,
     input_interleaved_buffer: []u8,
     output_interleaved_buffer: []u8,
@@ -402,13 +403,13 @@ init_asio_backend_context :: proc "c" (pContext: ^ma.context_type, pConfig: ^ma.
     // ici on init le driver ASIO, et on récupère tous les devices dispos
     context = set_odin_context()
         
-    asio.asioDrivers = asio.driversAllocate()
+    asio_backend.drivers = asio.driversAllocate()
     
     for &name in asio_backend.driver_names {
         name = cstring(raw_data(make([]u8, 32)))
     }
     
-    asio_backend.ndrivers = asio.getDriverNames(asio.asioDrivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
+    asio_backend.ndrivers = asio.getDriverNames(asio_backend.drivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
     
     
     callbacks.onContextInit             = init_asio_backend_context
@@ -426,8 +427,8 @@ init_asio_backend_context :: proc "c" (pContext: ^ma.context_type, pConfig: ^ma.
 uninit_asio_backend_context :: proc "c" (pContext: ^ma.context_type) -> ma.result {
     context = set_odin_context()
         
-    asio.driversDestroy(asio.asioDrivers)
-    asio.asioDrivers = nil
+    asio.driversDestroy(asio_backend.drivers)
+    asio_backend.drivers = nil
     
     return .SUCCESS 
 }
@@ -461,7 +462,7 @@ get_asio_context_device_info :: proc "c" (ma_context: ^ma.context_type, device_t
 
     mem.zero_item(device_info)
     
-    if !asio.getCurrentDriverName(&asio.asioDrivers, cstring(raw_data(device_info.name[:]))) { return .NO_DEVICE }
+    if !asio.getCurrentDriverName(asio_backend.drivers, cstring(raw_data(device_info.name[:]))) { return .NO_DEVICE }
     
     device_info.nativeDataFormatCount = 1
     // device_info.nativedataFormats[0] = { format = .f32, channels = 2}
@@ -487,7 +488,7 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
 
     driver_name := asio_backend.driver_names[3]
 
-    if !asio.loadDriver(asio.asioDrivers, driver_name) { return .ERROR }
+    if !asio.loadDriver(asio_backend.drivers, "Focusrite USB ASIO") { return .ERROR }
     
     if asio.Init(&driver_info) != .OK {
         asio.Exit()
@@ -522,6 +523,7 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
     fmt.println("Asio samplerate at init time: ", asio_backend.samplerate, "Hz")
     
     
+    // cycler tout les canaux pour récupérer toutes les infos
     channel_info: asio.ChannelInfo;
     asio.GetChannelInfo(&channel_info)
     
@@ -753,6 +755,11 @@ main :: proc() {
     ma_result: ma.result
     
     miniaudio_backends := []ma.backend { .custom } 
+
+    asio_backend.drivers = asio.driversAllocate()
+    asio_backend.ndrivers = asio.getDriverNames(asio_backend.drivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
+    asio.loadDriver(asio_backend.drivers, "Focusrite USB ASIO")
+
     
     context_config := ma.context_config_init()
     context_config.custom.onContextInit = init_asio_backend_context

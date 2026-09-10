@@ -7,17 +7,6 @@ foreign import lib {
     "system:ole32.lib",
 }
 
-/*
-intégrer le aiso sdk dans le projet 
-ajouter un fichier asio_c.c avec un enrobage des fonctions et méthodes dans un extern "c" {}
-faire l'interface dans odin avec CES procédures là.
-
-reprendre toutes les tailles d'entiers 
-
-
-*/
-
-
 Samples :: c.longlong
 TimeStamp :: c.longlong
 SampleRate :: f32
