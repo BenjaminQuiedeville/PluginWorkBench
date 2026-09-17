@@ -2,7 +2,12 @@ package asio
 
 import "core:c"
 
-foreign import lib "asio.lib"
+foreign import lib {
+    "asio.lib",
+    "system:ole32.lib",
+    "system:user32.lib",
+    "system:advapi32.lib",
+}
 
 // utility to list and load a driver before launching the ASIO machinery
 
@@ -31,4 +36,7 @@ foreign lib {
     removeCurrentDriver :: proc(this: rawptr) ---
     
     getCurrentDriverIndex :: proc(this: rawptr) -> c.long ---
+
+    @(link_name = "c_loadAsioDriver")
+    loadAsioDriver :: proc(name: cstring) -> bool ---
 }

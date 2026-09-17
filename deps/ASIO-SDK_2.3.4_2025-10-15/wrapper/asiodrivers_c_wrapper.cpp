@@ -5,6 +5,8 @@
 
 extern AsioDrivers *asioDrivers;
 
+bool loadAsioDriver(char *name);
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -47,6 +49,9 @@ long getCurrentDriverIndex(pAsioDrivers ptr) {
     return drivers->getCurrentDriverIndex(); 
 }
 
+bool c_loadAsioDriver(char *name) {
+    return loadAsioDriver(name);
+}
 
 
 #ifdef __cplusplus

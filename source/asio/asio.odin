@@ -5,11 +5,13 @@ import "core:c"
 foreign import lib { 
     "asio.lib",
     "system:ole32.lib",
+    "system:user32.lib",
+    "system:advapi32.lib",
 }
 
 Samples :: c.longlong
 TimeStamp :: c.longlong
-SampleRate :: f32
+SampleRate :: f64
 Bool :: c.long
 
 True :: Bool(true)
@@ -578,7 +580,7 @@ foreign lib {
         Parameter:
           sampleRate: on input, the requested rate
         Returns:
-          If sampleRate is unknown ASE_NoClock will be returned.
+          If sampleRate  is unknown ASE_NoClock will be returned.
           If the current clock is external, and sampleRate is != 0,
           ASE_InvalidMode will be returned
           If no input/output is present ASE_NotPresent will be returned.

@@ -180,7 +180,7 @@ init_miniaudio_device :: proc(host: ^Plugin_Host, samplerate: f64, buffer_size: 
     device_config.pUserData = host
 
     ma_result := ma.device_init(&asio_backend.miniaudio_context, &device_config, &host.audio_device)
-    assert(ma_result == .SUCCESS)
+    assert(ma_result == .SUCCESS, "Error during initialisation of miniaudio device")
     
     return ma_result
 }
@@ -420,6 +420,9 @@ init_asio_backend_context :: proc "c" (pContext: ^ma.context_type, pConfig: ^ma.
     callbacks.onDeviceUninit            = uninit_asio_device
     callbacks.onDeviceStart             = start_asio_device
     callbacks.onDeviceStop              = stop_asio_device
+
+    asio.driversDestroy(asio_backend.drivers)
+    asio_backend.drivers = nil
         
     return .SUCCESS 
 }
@@ -455,7 +458,6 @@ enumerate_asio_devices :: proc "c" (pContext: ^ma.context_type, enum_callback: m
 }
 
 get_asio_context_device_info :: proc "c" (ma_context: ^ma.context_type, device_type: ma.device_type, device_id: ^ma.device_id, device_info: ^ma.device_info) -> ma.result {
-    
     context = set_odin_context()
     
     if asio_backend.audio_device == nil { return .NO_DEVICE }
@@ -479,6 +481,7 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
     asio_error: asio.Error
 
     driver_info: asio.DriverInfo
+    driver_info.asioVersion = 2
     driver_info.sysRef = asio_backend.miniaudio_context.dsound.hWnd
         
     fmt.printf("asioVersion:   %d\n driverVersion: %d\n Name:          %s\n ErrorMessage:  %s\n",
@@ -486,74 +489,75 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
                string(driver_info.name[:]), string(driver_info.errorMessage[:]))
     
 
-    driver_name := asio_backend.driver_names[3]
+    driver_name := asio_backend.driver_names[2]
 
-    if !asio.loadDriver(asio_backend.drivers, "Focusrite USB ASIO") { return .ERROR }
+    if !asio.loadAsioDriver(driver_name) { return .ERROR }
+    
     
     if asio.Init(&driver_info) != .OK {
         asio.Exit()
         return .ERROR
     }
 
+    asio_backend.asio_callbacks.bufferSwitch = switch_asio_buffers
+    asio_backend.asio_callbacks.sampleRateDidChange = asio_samplerate_did_change
+    asio_backend.asio_callbacks.asioMessage = process_asio_message
+    asio_backend.asio_callbacks.bufferSwitchTimeInfo = switch_asio_buffers_with_time_info
+
+
     if asio.GetChannels(&asio_backend.ninput_channels, &asio_backend.noutput_channels) != .OK {
         asio.Exit()
         return .ERROR
     }
     
-    min_size, max_size, preffered_size, granularity: i32
-    if asio.GetBufferSize(&min_size, &max_size, &preffered_size, &granularity) != .OK {
+    min_size, max_size, prefered_size, granularity: i32
+    if asio.GetBufferSize(&min_size, &max_size, &prefered_size, &granularity) != .OK {
         asio.Exit()
         return .ERROR
     }
     
-    asio_backend.block_size = min_size
+    asio_backend.block_size = prefered_size
     
-    samplerate := f32(config.sampleRate)
-    if asio.SetSampleRate(samplerate) != .OK {
-        asio.Exit()
-        return .ERROR
+    clock_sources: [4]asio.ClockSource    
+    num_sources: i32 = len(clock_sources)
+    
+    if asio.GetClockSources(raw_data(clock_sources[:]), &num_sources) == .NotPresent {
+        panic("Error during gathering of asio clock sources")
     }
     
-    asio_backend.samplerate = f64(samplerate)
-    
-    if asio.GetSampleRate(&samplerate) == .OK && samplerate > 0.0 {
-        asio_backend.samplerate = f64(samplerate)
+    if num_sources == 1 {
+        if asio.SetClockSource(0) != .OK {
+            assert(false, "Error during asio.SetClockSource")
+        }
     }
     
+
+    
+    if asio.CanSampleRate(asio_backend.samplerate) == .OK {
+        asio.SetSampleRate(asio_backend.samplerate)
+
+        current_samplerate: f64
+        asio.GetSampleRate(&current_samplerate)
+        assert(current_samplerate == asio_backend.samplerate, "error during asio samplerate setup")
+    } else {
+        
+        assert(asio.CanSampleRate(44100.0) == .OK)
+        asio.SetSampleRate(44100.0)
+        
+        current_samplerate: f64
+        asio.GetSampleRate(&current_samplerate)
+        assert(current_samplerate == 44100.0)
+        
+        asio_backend.samplerate = 44100.0
+    }
+
+    
+    //asio_backend.samplerate
     fmt.println("Asio samplerate at init time: ", asio_backend.samplerate, "Hz")
     
-    
-    // cycler tout les canaux pour récupérer toutes les infos
-    channel_info: asio.ChannelInfo;
-    asio.GetChannelInfo(&channel_info)
-    
-    switch channel_info.type {
-    
-        case .Int16MSB, .Int16LSB: {
-            asio_backend.frame_size_bytes = 2
-            asio_backend.sample_format = .s16
-        }
-        case .Int24MSB, .Int24LSB: {
-            asio_backend.frame_size_bytes = 3
-            asio_backend.sample_format = .s24
-        }
-        case .Int32MSB, .Int32MSB16..=.Int32MSB24, .Int32LSB, .Int32LSB16..=.Int32LSB24: {
-            asio_backend.frame_size_bytes = 4
-            asio_backend.sample_format = .s32
-        }
-        
-        case .Float32MSB, .Float32LSB: {
-            asio_backend.frame_size_bytes = 4
-            asio_backend.sample_format = .f32
-        }
 
-        case .Float64MSB, .Float64LSB, .DSDInt8LSB1, .DSDInt8MSB1, .DSDInt8NER8: {
-            panic("Does not support 64 bit and DSDInt samples")
-        }
-    }
-    
+    // setup buffers
     total_num_channels := asio_backend.ninput_channels + asio_backend.noutput_channels
-    
     asio_backend.buffer_infos = make([]asio.BufferInfo, total_num_channels)
     
     
@@ -572,19 +576,58 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
         buffer.channelNum = index
         buffer.buffers = {nil, nil}
     }
-        
-    asio_backend.asio_callbacks.bufferSwitch = switch_asio_buffers
-    asio_backend.asio_callbacks.sampleRateDidChange = asio_samplerate_did_change
-    asio_backend.asio_callbacks.asioMessage = process_asio_message
-    asio_backend.asio_callbacks.bufferSwitchTimeInfo = switch_asio_buffers_with_time_info
-    
+            
     if asio.CreateBuffers(raw_data(asio_backend.buffer_infos[:]), total_num_channels, 
                          asio_backend.block_size, &asio_backend.asio_callbacks) != .OK
     {
         asio.DisposeBuffers()
         asio.Exit()
         return .ERROR
+    }    
+    
+    
+    // cycler tout les canaux pour récupérer toutes les infos
+    for channel_index in 0..<asio_backend.ninput_channels {
+        
+        channel_info: asio.ChannelInfo
+        channel_info.channel = channel_index
+        channel_info.isInput = asio.True
+        asio.GetChannelInfo(&channel_info)
+        
+        switch channel_info.type {
+        
+            case .Int16MSB, .Int16LSB: {
+                asio_backend.frame_size_bytes = 2
+                asio_backend.sample_format = .s16
+            }
+            case .Int24MSB, .Int24LSB: {
+                asio_backend.frame_size_bytes = 3
+                asio_backend.sample_format = .s24
+            }
+            case .Int32MSB, .Int32MSB16..=.Int32MSB24, .Int32LSB, .Int32LSB16..=.Int32LSB24: {
+                asio_backend.frame_size_bytes = 4
+                asio_backend.sample_format = .s32
+            }
+            
+            case .Float32MSB, .Float32LSB: {
+                asio_backend.frame_size_bytes = 4
+                asio_backend.sample_format = .f32
+            }
+    
+            case .Float64MSB, .Float64LSB, .DSDInt8LSB1, .DSDInt8MSB1, .DSDInt8NER8: {
+                panic("Does not support 64 bit and DSDInt samples")
+            }
+        }
+    
+        
     }
+
+
+    for channel_index in 0..<asio_backend.noutput_channels {
+    
+    }
+    
+
 
     asio_backend.input_interleaved_buffer = make([]u8, asio_backend.block_size * asio_backend.frame_size_bytes * asio_backend.ninput_channels)
 
@@ -756,9 +799,9 @@ main :: proc() {
     
     miniaudio_backends := []ma.backend { .custom } 
 
-    asio_backend.drivers = asio.driversAllocate()
-    asio_backend.ndrivers = asio.getDriverNames(asio_backend.drivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
-    asio.loadDriver(asio_backend.drivers, "Focusrite USB ASIO")
+    // asio_backend.drivers = asio.driversAllocate()
+    // asio_backend.ndrivers = asio.getDriverNames(asio_backend.drivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
+    // asio.loadDriver(asio_backend.drivers, "ASIO4ALL v2")
 
     
     context_config := ma.context_config_init()
