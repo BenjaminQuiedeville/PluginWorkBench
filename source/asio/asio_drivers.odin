@@ -10,15 +10,9 @@ foreign import lib {
 }
 
 // utility to list and load a driver before launching the ASIO machinery
-
 @(default_calling_convention = "c")
 foreign lib {
     
-    @(link_name = "c_asioDrivers")
-    asioDrivers: rawptr
-    
-    theAsioDriver: rawptr
-
     @(link_name = "AsioDrivers_allocate")
     driversAllocate :: proc() -> rawptr ---
     

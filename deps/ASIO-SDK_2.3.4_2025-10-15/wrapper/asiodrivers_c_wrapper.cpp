@@ -1,5 +1,6 @@
-
 #include <windows.h>
+#include <assert.h>
+
 #include "../host/pc/asiolist.h"
 #include "../host/asiodrivers.h"
 
@@ -13,15 +14,20 @@ extern "C" {
 
 typedef void* pAsioDrivers;
 
-void *c_asioDrivers = (void*)asioDrivers;
-// void *c_theAsioDriver = (void*)theAsioDriver; 
+pAsioDrivers AsioDrivers_allocate() {
+    
+    AsioDrivers *drivers = new AsioDrivers();
+    asioDrivers = drivers;
 
-pAsioDrivers AsioDrivers_allocate() { 
-    return (pAsioDrivers)(new AsioDrivers()); 
+    return (pAsioDrivers)drivers; 
+
 }
+void AsioDrivers_destroy(pAsioDrivers ptr) {
 
-void AsioDrivers_destroy(pAsioDrivers ptr) { 
+    assert(ptr == asioDrivers && "asioDrivers ptr passed not corresponding to global value");
+
     delete (AsioDrivers*)ptr; 
+    asioDrivers = nullptr;
 }
 
 bool getCurrentDriverName(pAsioDrivers ptr, char *name) { 
