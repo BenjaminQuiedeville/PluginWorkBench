@@ -55,7 +55,7 @@ KeyswitchInfo :: struct #packed
 PhysicalUIMap :: struct {
     physical_ui_type_id: PhysicalUITypeID,
     note_expression_type_id: NoteExpressionTypeID,
-};
+}
 
 PhysicalUIMapList :: struct {
     count: u32,
@@ -108,7 +108,7 @@ BusInfo :: struct {
     name: [128]u16,
     bus_type: BusType,
     flags: BusFlags,
-};
+}
 
 RoutingInfo :: struct {
     media_type: MediaType,
@@ -200,7 +200,7 @@ ScaleEvent :: struct {
     mask: i16,
     textLen: u16,
     text: ^u16,
-};
+}
 
 LegacyMIDICCOutEvent :: struct {
     controlNumber: u8,
@@ -265,7 +265,7 @@ AudioBusBuffers :: struct {
     num_channels: i32,
     silence_flags: u64,
     using buffers: AudioBusBufferVariant,
-};
+}
 
 ProcessData :: struct {
     process_mode: ProcessMode,
@@ -280,7 +280,7 @@ ProcessData :: struct {
     input_events: ^IEventList,
     output_events: ^IEventList,
     process_context: ^ProcessContext,
-};
+}
 
 UnitInfo :: struct {
     id: UnitID,

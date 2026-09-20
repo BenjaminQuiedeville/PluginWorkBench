@@ -255,7 +255,7 @@ kRockMetal :: "Rock/Metal"
 kRockMetalBluesRock :: "Rock/Metal|Blues Rock"
 kRockMetalClassicRock :: "Rock/Metal|Classic Rock"
 kRockMetalHardRock :: "Rock/Metal|Hard Rock"
-kRockMetalRockRoll :: "Rock/Metal|Rock &amp Roll";
+kRockMetalRockRoll :: "Rock/Metal|Rock &amp Roll"
 kRockMetalSingerSongwriter :: "Rock/Metal|Singer/Songwriter"
 kRockMetalHeavyMetal :: "Rock/Metal|Heavy Metal"
 kRockMetalDeathBlackMetal :: "Rock/Metal|Death/Black Metal"
