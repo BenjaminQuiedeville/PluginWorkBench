@@ -16,7 +16,7 @@ auto_jump_to_error:     true
 error_regex:            ^(?P<file>.*)\((?P<line>\d+):(?P<col>\d+)\) (?P<type>Error|Syntax Error): (?P<msg>.*)$
 
 [Debug Build]   # <- command name. Can be arbitrary
-build_command:          odin build Source -debug -out:bench.exe
+build_command:          odin build Source -debug -out:bench.exe -vet-semicolon
 build_working_dir:      %PROJECT_CONFIG_DIR%
 # timeout_in_seconds:     5             # if you don't want a timeout, don't specify it
 key_binding:            F5
