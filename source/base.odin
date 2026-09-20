@@ -14,7 +14,7 @@ u16_array_to_cstring :: proc(chars: []u16, allocator := context.temp_allocator) 
     
     for char, index in chars {
         if char == 0 {
-            break;
+            break
         }
         string_size += 1
     }
@@ -43,7 +43,7 @@ u16_array_to_string16 :: proc(chars: []u16) -> string16 {
     
     for char, index in chars {
         if char == 0 {
-            break;
+            break
         }
         string_size += 1
     }

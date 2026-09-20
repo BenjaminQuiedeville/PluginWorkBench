@@ -71,7 +71,7 @@ Vst_Host :: struct {
 
 host_query_interface :: proc "system" (this: rawptr, iid: [^]u8, obj: ^rawptr) -> vst3.Result { 
     
-    context = set_odin_context()
+    context = set_odin_context_main_allocator()
     
     host_app_uuid, _ := vst3.parse_uuid(vst3.IHostApplication_iid)
     audio_processor_uuid, _ := vst3.parse_uuid(vst3.IAudioProcessor_iid)
@@ -115,7 +115,7 @@ param_value_queue_vtbl := vst3.IParamValueQueueVtbl {
     },
         
     get_point = proc "system" (this: rawptr, index: i32, sample_offset: ^i32, value: ^f64) -> vst3.Result {
-        context = set_odin_context()
+        context = set_odin_context_main_allocator()
         param_queue := transmute(^Vst_Value_Queue)this
     
         if index < 0 { return .InvalidArgument }
@@ -268,7 +268,7 @@ vst_host_vtbl := vst3.IHostApplicationVtbl {
     },
 
     create_instance = proc "system" (this: rawptr, class_id: [^]u8, iid: [^]u8, msg: ^rawptr) -> vst3.Result {
-        context = set_odin_context() 
+        context = set_odin_context_main_allocator() 
                
         // message_iid, _ := vst3.parse_uuid(vst3.IMessage_iid)
         

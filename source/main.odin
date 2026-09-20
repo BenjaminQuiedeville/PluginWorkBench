@@ -111,6 +111,8 @@ EventFIFO :: struct {
 
 Asio_Backend :: struct {
     
+    arena: vmem.Arena,
+    
     asio_callbacks: asio.Callbacks,
     buffer_infos: []asio.BufferInfo,
 
@@ -118,6 +120,7 @@ Asio_Backend :: struct {
 
     driver_names: [8]cstring,
     ndrivers: i32,
+    driver_index: c.long,
 
     drivers: rawptr,
     audio_device: ^ma.device,
@@ -129,7 +132,10 @@ Asio_Backend :: struct {
     noutput_channels: i32,
     samplerate: f64,
     frame_size_bytes: i32,
-    block_size: i32,
+    buffer_size: i32,
+    input_latency: c.long,
+    output_latency: c.long,
+    uses_output_ready_notification: bool,
 }
 
 // Audio_Thread_Status :: enum {
@@ -158,7 +164,7 @@ main_allocator: runtime.Allocator
 audio_allocator: runtime.Allocator
 
 
-set_odin_context :: proc "contextless" () -> runtime.Context {
+set_odin_context_main_allocator :: proc "contextless" () -> runtime.Context {
     context = runtime.default_context()
     context.allocator = main_allocator
     
@@ -348,10 +354,111 @@ main_audio_procedure :: proc "c" (device: ^ma.device, output: rawptr, input: raw
 
 asio_backend: Asio_Backend
 
-switch_asio_buffers :: proc "c" (doubleBufferIndex: c.long, directProcess: asio.Bool) {}
+get_asio_allocator :: proc() -> runtime.Allocator {
 
-switch_asio_buffers_with_time_info :: proc "c" (params: ^asio.Time, doubleBufferIndex: c.long, directProcess: asio.Bool) -> ^asio.Time { 
+    // check if arena is initialised
+    if asio_backend.arena.total_reserved == 0 {
+        error := vmem.arena_init_growing(&asio_backend.arena)
+        assert(error == nil, " [ASIO] - Error during the creation of the arena allocator")
+    }
+    
+    return vmem.arena_allocator(&asio_backend.arena)    
+}
+
+
+deinterleave_buffers :: proc(input: []f32, output: [][]f32, nchannels: int) {
+
+    #no_bounds_check for sample_index in 0..<len(output[0]) {
+        for channel_index in 0..<nchannels {
+           output[channel_index][sample_index] = input[sample_index*nchannels+channel_index]
+        }
+    }
+}
+
+interleave_buffers :: proc(input: [][]f32, output: []f32, nchannels: int) {
+
+    #no_bounds_check for sample_index in 0..<len(input[0]) {
+        for channel_index in 0..<nchannels {
+            output[sample_index*nchannels + channel_index] = input[channel_index][sample_index]
+        }
+    }
+}
+
+
+switch_asio_buffers :: proc "c" (doubleBufferIndex: c.long, directProcess: asio.Bool) {
+
+    time_info: asio.Time
+    
+    if asio.GetSamplePosition(&time_info.timeInfo.samplePosition, &time_info.timeInfo.systemTime) == .OK {
+        time_info.timeInfo.flags = .SystemTimeValid | .SamplePositionValid
+    }
+    
+    switch_asio_buffers_with_time_info(&time_info, doubleBufferIndex, directProcess)
+}
+
+switch_asio_buffers_with_time_info :: proc "c" (time: ^asio.Time, dma_buffer_index: c.long, directProcess: asio.Bool) -> ^asio.Time { 
+    context = runtime.default_context()
     // callback audio principal si kAsioSupportsTimeInfo == true
+    
+    // interlrave
+
+    // interleave_buffers(asio_backend.buffer)
+
+    nchannels := asio_backend.ninput_channels + asio_backend.noutput_channels
+
+    deinterleaved_input_channels: [ma.MAX_CHANNELS]rawptr
+    deinterleaved_output_channels: [ma.MAX_CHANNELS]rawptr
+     
+    for channel_index in 0..<asio_backend.ninput_channels {
+        deinterleaved_input_channels[channel_index] = asio_backend.buffer_infos[channel_index].buffers[dma_buffer_index]
+    }
+    
+    for channel_index in 0..<asio_backend.noutput_channels {
+        deinterleaved_output_channels[channel_index] = asio_backend.buffer_infos[asio_backend.ninput_channels + channel_index].buffers[dma_buffer_index]
+    }
+    
+    ma.interleave_pcm_frames(asio_backend.sample_format, 
+                            cast(u32)asio_backend.ninput_channels, 
+                            cast(u64)asio_backend.buffer_size, 
+                            raw_data(deinterleaved_input_channels[:]), 
+                            raw_data(asio_backend.input_interleaved_buffer))
+
+	ma.pcm_convert(raw_data(asio_backend.input_interleaved_buffer), .f32, 
+	               raw_data(asio_backend.input_interleaved_buffer), asio_backend.sample_format, 
+	               cast(u64)(asio_backend.buffer_size*asio_backend.ninput_channels), .triangle)
+
+
+    // for sample_index in 0..<asio_backend.buffer_size {
+    //     for channel_index in 0..<nchannels {
+    //         sample := asio_backend.buffer_infos[channel_index].buffers[dma_buffer_index][sample_index]
+    //         asio_backend.input_interleaved_buffer[sample_index*nchannels + channel_index] = sample 
+    //     }
+    // }
+    
+    // send to miniaudio 
+    ma.device_handle_backend_data_callback(asio_backend.audio_device, 
+                                           raw_data(asio_backend.output_interleaved_buffer), 
+                                           raw_data(asio_backend.input_interleaved_buffer), 
+                                           cast(u32)asio_backend.buffer_size)
+    
+    
+    // deinterleave    
+    
+    ma.pcm_convert(raw_data(asio_backend.output_interleaved_buffer), asio_backend.sample_format, 
+                   raw_data(asio_backend.output_interleaved_buffer), .f32, 
+                   cast(u64)(asio_backend.buffer_size*asio_backend.noutput_channels), .triangle)
+        
+    ma.deinterleave_pcm_frames(asio_backend.sample_format, 
+                               cast(u32)asio_backend.noutput_channels, 
+                               cast(u64)asio_backend.buffer_size, 
+                               raw_data(asio_backend.input_interleaved_buffer),
+                               raw_data(deinterleaved_output_channels[:]))
+    
+    
+    if asio_backend.uses_output_ready_notification {
+        asio.OutputReady()
+    }
+    
     return nil 
 }
 
@@ -360,7 +467,8 @@ asio_samplerate_did_change :: proc "c" (samplerate: asio.SampleRate) {
 }
 
 process_asio_message :: proc "c" (selector: asio.MessageSelector, value: c.long, message: rawptr, opt: ^f64) -> c.long { 
-    context = set_odin_context()
+    context = runtime.default_context()
+    context.allocator = get_asio_allocator()
     
     switch selector {
         case .SelectorSupported: { 
@@ -374,7 +482,11 @@ process_asio_message :: proc "c" (selector: asio.MessageSelector, value: c.long,
         }
         case .EngineVersion: { return 2 }
         case .ResetRequest: { 
-            unimplemented()
+        
+            uninit_asio_stream()
+            init_asio_stream(asio_backend.samplerate)
+            asio.Start()
+
             // return 1 
         }
         case .BufferSizeChange: { return 0 }
@@ -401,7 +513,7 @@ process_asio_message :: proc "c" (selector: asio.MessageSelector, value: c.long,
 init_asio_backend_context :: proc "c" (pContext: ^ma.context_type, pConfig: ^ma.context_config, callbacks: ^ma.backend_callbacks) -> ma.result {
     // le passer au context_config.custom.oncontextinit
     // ici on init le driver ASIO, et on récupère tous les devices dispos
-    context = set_odin_context()
+    context = set_odin_context_main_allocator()
         
     asio_backend.drivers = asio.driversAllocate()
     
@@ -422,13 +534,12 @@ init_asio_backend_context :: proc "c" (pContext: ^ma.context_type, pConfig: ^ma.
     callbacks.onDeviceStop              = stop_asio_device
 
     asio.driversDestroy(asio_backend.drivers)
-    asio_backend.drivers = nil
         
     return .SUCCESS 
 }
 
 uninit_asio_backend_context :: proc "c" (pContext: ^ma.context_type) -> ma.result {
-    context = set_odin_context()
+    context = set_odin_context_main_allocator()
         
     asio.driversDestroy(asio_backend.drivers)
     asio_backend.drivers = nil
@@ -438,7 +549,7 @@ uninit_asio_backend_context :: proc "c" (pContext: ^ma.context_type) -> ma.resul
 
 enumerate_asio_devices :: proc "c" (pContext: ^ma.context_type, enum_callback: ma.enum_devices_callback_proc, pUserData: rawptr) -> ma.result {
     // donner les devices récupérés dans onContextInit
-    context = set_odin_context()
+    context = set_odin_context_main_allocator()
     
     for driver_index in 0..<asio_backend.ndrivers {
         
@@ -458,13 +569,14 @@ enumerate_asio_devices :: proc "c" (pContext: ^ma.context_type, enum_callback: m
 }
 
 get_asio_context_device_info :: proc "c" (ma_context: ^ma.context_type, device_type: ma.device_type, device_id: ^ma.device_id, device_info: ^ma.device_info) -> ma.result {
-    context = set_odin_context()
+    context = set_odin_context_main_allocator()
     
     if asio_backend.audio_device == nil { return .NO_DEVICE }
 
     mem.zero_item(device_info)
     
-    if !asio.getCurrentDriverName(asio_backend.drivers, cstring(raw_data(device_info.name[:]))) { return .NO_DEVICE }
+    mem.copy(raw_data(device_info.name[:]), 
+            transmute([^]u8)(asio_backend.driver_names[asio_backend.driver_index]), 32) 
     
     device_info.nativeDataFormatCount = 1
     // device_info.nativedataFormats[0] = { format = .f32, channels = 2}
@@ -472,28 +584,24 @@ get_asio_context_device_info :: proc "c" (ma_context: ^ma.context_type, device_t
     return .SUCCESS 
 }
 
-init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, playback_descriptor, capture_descriptor: ^ma.device_descriptor) -> ma.result {
-    // ici on initialise tout ce qu'on peut du moteur asio 
-    // Init,  ASIOCreateBuffers
-    
-    context = set_odin_context()
-    
+init_asio_stream :: proc(wanted_samplerate: f64) -> ma.result {
     asio_error: asio.Error
 
     driver_info: asio.DriverInfo
     driver_info.asioVersion = 2
-    driver_info.sysRef = asio_backend.miniaudio_context.dsound.hWnd
         
-    fmt.printf("asioVersion:   %d\n driverVersion: %d\n Name:          %s\n ErrorMessage:  %s\n",
+    fmt.printf("[ASIO] - asioVersion:   %d\n driverVersion: %d\n Name:          %s\n ErrorMessage:  %s\n",
                driver_info.asioVersion, driver_info.driverVersion,
                string(driver_info.name[:]), string(driver_info.errorMessage[:]))
     
 
     driver_name := asio_backend.driver_names[2]
 
-    if !asio.loadAsioDriver(driver_name) { return .ERROR }
+    asio_backend.drivers = asio.driversAllocate()
+    if !asio.loadDriver(asio_backend.drivers, driver_name) { return .ERROR }
     
-    
+    asio_backend.driver_index = asio.getCurrentDriverIndex(asio_backend.drivers)
+        
     if asio.Init(&driver_info) != .OK {
         asio.Exit()
         return .ERROR
@@ -516,7 +624,7 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
         return .ERROR
     }
     
-    asio_backend.block_size = prefered_size
+    asio_backend.buffer_size = prefered_size
     
     clock_sources: [4]asio.ClockSource    
     num_sources: i32 = len(clock_sources)
@@ -532,7 +640,7 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
     }
     
 
-    
+    asio_backend.samplerate = wanted_samplerate
     if asio.CanSampleRate(asio_backend.samplerate) == .OK {
         asio.SetSampleRate(asio_backend.samplerate)
 
@@ -550,11 +658,15 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
         
         asio_backend.samplerate = 44100.0
     }
-
     
     //asio_backend.samplerate
-    fmt.println("Asio samplerate at init time: ", asio_backend.samplerate, "Hz")
-    
+    fmt.println("[ASIO] - samplerate at init time: ", asio_backend.samplerate, "Hz")
+
+    if asio.OutputReady() == .OK { 
+        asio_backend.uses_output_ready_notification = true
+    } else {
+        asio_backend.uses_output_ready_notification = false 
+    }
 
     // setup buffers
     total_num_channels := asio_backend.ninput_channels + asio_backend.noutput_channels
@@ -578,23 +690,28 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
     }
             
     if asio.CreateBuffers(raw_data(asio_backend.buffer_infos[:]), total_num_channels, 
-                         asio_backend.block_size, &asio_backend.asio_callbacks) != .OK
+                         asio_backend.buffer_size, &asio_backend.asio_callbacks) != .OK
     {
         asio.DisposeBuffers()
         asio.Exit()
         return .ERROR
     }    
     
+    for &buffer_info in asio_backend.buffer_infos {
+        mem.zero(buffer_info.buffers[0], cast(int)(asio_backend.buffer_size * asio_backend.frame_size_bytes))
+        mem.zero(buffer_info.buffers[1], cast(int)(asio_backend.buffer_size * asio_backend.frame_size_bytes))
+    }
     
-    // cycler tout les canaux pour récupérer toutes les infos
-    for channel_index in 0..<asio_backend.ninput_channels {
+    { // get device sample format
+    
+        sample_input_channel := asio.ChannelInfo {
+            channel = 0,
+            isInput = asio.True,
+        }
         
-        channel_info: asio.ChannelInfo
-        channel_info.channel = channel_index
-        channel_info.isInput = asio.True
-        asio.GetChannelInfo(&channel_info)
+        asio.GetChannelInfo(&sample_input_channel)
         
-        switch channel_info.type {
+        switch sample_input_channel.type {
         
             case .Int16MSB, .Int16LSB: {
                 asio_backend.frame_size_bytes = 2
@@ -618,40 +735,61 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
                 panic("Does not support 64 bit and DSDInt samples")
             }
         }
-    
-        
-    }
-
-
-    for channel_index in 0..<asio_backend.noutput_channels {
-    
     }
     
+    asio_backend.input_interleaved_buffer = make([]u8, asio_backend.buffer_size * asio_backend.frame_size_bytes * asio_backend.ninput_channels)
 
+    return .SUCCESS
+}
 
-    asio_backend.input_interleaved_buffer = make([]u8, asio_backend.block_size * asio_backend.frame_size_bytes * asio_backend.ninput_channels)
+uninit_asio_stream :: proc() {
 
+    asio.Stop()
+    asio.DisposeBuffers()
+    asio.Exit()
+    
+    asio_backend.audio_device = nil
+    
+    vmem.arena_destroy(&asio_backend.arena)
+}
+
+init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, playback_descriptor, capture_descriptor: ^ma.device_descriptor) -> ma.result {
+    // ici on initialise tout ce qu'on peut du moteur asio 
+    // Init,  ASIOCreateBuffers
+    
+    context = runtime.default_context()
+    context.allocator = get_asio_allocator()
+    
+    
+    // -------
+    
+    init_asio_stream(cast(f64)config.sampleRate)
+    
+    config.sampleRate = cast(u32)asio_backend.samplerate
+    config.periodSizeInFrames = cast(u32)asio_backend.buffer_size
+    
+
+    capture_descriptor.shareMode = .shared
     capture_descriptor.format = asio_backend.sample_format
     capture_descriptor.channels = cast(u32)asio_backend.ninput_channels
     capture_descriptor.sampleRate = cast(u32)asio_backend.samplerate
-    capture_descriptor.periodSizeInFrames = cast(u32)asio_backend.block_size
+    capture_descriptor.periodSizeInFrames = cast(u32)asio_backend.buffer_size
     
     ma.channel_map_init_standard(.default, raw_data(capture_descriptor.channelMap[:]), ma.MAX_CHANNELS, cast(u32)asio_backend.ninput_channels)
 
 
-    asio_backend.output_interleaved_buffer = make([]u8, asio_backend.block_size * asio_backend.frame_size_bytes * asio_backend.noutput_channels)
+    asio_backend.output_interleaved_buffer = make([]u8, asio_backend.buffer_size * asio_backend.frame_size_bytes * asio_backend.noutput_channels)
 
+    playback_descriptor.shareMode = .shared
     playback_descriptor.format = asio_backend.sample_format
     playback_descriptor.channels = cast(u32)asio_backend.noutput_channels
     playback_descriptor.sampleRate = cast(u32)asio_backend.samplerate
-    playback_descriptor.periodSizeInFrames = cast(u32)asio_backend.block_size
+    playback_descriptor.periodSizeInFrames = cast(u32)asio_backend.buffer_size
     
     ma.channel_map_init_standard(.default, raw_data(playback_descriptor.channelMap[:]), ma.MAX_CHANNELS, cast(u32)asio_backend.noutput_channels)
-    
-    input_latency, output_latency: c.long
-    
-    asio.GetLatencies(&input_latency, &output_latency)
-    fmt.printfln("Input ASIO latency: %d samples \nOutput ASIO latency: %d samlples", input_latency, output_latency)
+        
+    asio.GetLatencies(&asio_backend.input_latency, &asio_backend.output_latency)
+    fmt.printfln("Input ASIO latency: %d samples \nOutput ASIO latency: %d samlples", asio_backend.input_latency, asio_backend.output_latency)
     
     asio_backend.audio_device = device
 
@@ -660,24 +798,23 @@ init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, pla
 
 uninit_asio_device :: proc "c" (pDevice: ^ma.device) -> ma.result {
 
-    asio.Stop()
-    asio.DisposeBuffers()
-    asio.Exit()
-    
-    asio_backend.audio_device = nil
+    context = runtime.default_context()
+    context.allocator = get_asio_allocator()
+
+    uninit_asio_stream()
 
     return .SUCCESS 
 }
 
 start_asio_device :: proc "c" (device: ^ma.device) -> ma.result {
     // Start 
-    context = set_odin_context()
+    context = set_odin_context_main_allocator()
     
     for channel_index in 0..<asio_backend.noutput_channels {
         info := &asio_backend.buffer_infos[asio_backend.ninput_channels + channel_index]
                 
-        if info.buffers[0] != nil { mem.zero(info.buffers[0], int(asio_backend.block_size * asio_backend.frame_size_bytes)) }
-        if info.buffers[1] != nil { mem.zero(info.buffers[1], int(asio_backend.block_size * asio_backend.frame_size_bytes)) }
+        if info.buffers[0] != nil { mem.zero(info.buffers[0], int(asio_backend.buffer_size * asio_backend.frame_size_bytes)) }
+        if info.buffers[1] != nil { mem.zero(info.buffers[1], int(asio_backend.buffer_size * asio_backend.frame_size_bytes)) }
     }
     
     error := asio.Start() 
@@ -693,7 +830,6 @@ start_asio_device :: proc "c" (device: ^ma.device) -> ma.result {
 
 stop_asio_device :: proc "c" (pDevice: ^ma.device) -> ma.result {
     // Stop
-    
     return asio.Stop() == .OK ? .SUCCESS : .ERROR
 }
 
@@ -829,6 +965,7 @@ main :: proc() {
     init_result := init_miniaudio_device(&host, host.samplerate, host.buffer_size)
 
     host.buffer_size = host.audio_device.playback.internalPeriodSizeInFrames
+    host.samplerate = f64(host.audio_device.sampleRate)
     host.audio_buffer = { make([]f32, host.buffer_size), make([]f32, host.buffer_size) }
     
     decoder_config := ma.decoder_config_init(.f32, 1, 48000)
