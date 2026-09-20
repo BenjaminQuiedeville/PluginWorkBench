@@ -19,15 +19,15 @@ False :: Bool(false)
 
 SampleType :: enum c.long {
     Int16MSB   = 0,
-    Int24MSB   = 1,        // used for 20 bits as well
+    Int24MSB   = 1,         // used for 20 bits as well
     Int32MSB   = 2,
-    Float32MSB = 3,        // IEEE 754 32 bit float
-    Float64MSB = 4,        // IEEE 754 64 bit double float
+    Float32MSB = 3,         // IEEE 754 32 bit float
+    Float64MSB = 4,         // IEEE 754 64 bit double float
 
     // these are used for 32 bit data buffer, with different alignment of the data inside
     // 32 bit PCI bus systems can be more easily used with these
-    Int32MSB16 = 8,        // 32 bit data with 16 bit alignment
-    Int32MSB18 = 9,        // 32 bit data with 18 bit alignment
+    Int32MSB16 = 8,         // 32 bit data with 16 bit alignment
+    Int32MSB18 = 9,         // 32 bit data with 18 bit alignment
     Int32MSB20 = 10,        // 32 bit data with 20 bit alignment
     Int32MSB24 = 11,        // 32 bit data with 24 bit alignment
     
@@ -35,7 +35,7 @@ SampleType :: enum c.long {
     Int24LSB   = 17,        // used for 20 bits as well
     Int32LSB   = 18,
     Float32LSB = 19,        // IEEE 754 32 bit float, as found on Intel x86 architecture
-    Float64LSB = 20,         // IEEE 754 64 bit double float, as found on Intel x86 architecture
+    Float64LSB = 20,        // IEEE 754 64 bit double float, as found on Intel x86 architecture
 
     // these are used for 32 bit data buffer, with different alignment of the data inside
     // 32 bit PCI bus systems can more easily used with these
@@ -47,7 +47,7 @@ SampleType :: enum c.long {
     //    ASIO DSD format.
     DSDInt8LSB1   = 32,        // DSD 1 bit data, 8 samples per byte. First sample in Least significant bit.
     DSDInt8MSB1   = 33,        // DSD 1 bit data, 8 samples per byte. First sample in Most significant bit.
-    DSDInt8NER8    = 40,        // DSD 8 bit data, 1 sample per byte. No Endianness required.
+    DSDInt8NER8   = 40,        // DSD 8 bit data, 1 sample per byte. No Endianness required.
 }
 
 /*-----------------------------------------------------------------------------
@@ -96,15 +96,15 @@ SampleType :: enum c.long {
 
 
 Error :: enum c.long {
-    OK = 0,             // This value will be returned whenever the call succeeded
+    OK = 0,                  // This value will be returned whenever the call succeeded
     SUCCESS = 0x3f4847a0,    // unique success return value for Future calls
-    NotPresent = -1000, // hardware input or output is not present or available
-    HWMalfunction,      // hardware is malfunctioning (can be returned by any ASIO function)
-    InvalidParameter,   // input parameter invalid
-    InvalidMode,        // hardware is in a bad mode or used in a bad mode
-    SPNotAdvancing,     // hardware is not running when sample position is inquired
-    NoClock,            // sample clock or rate cannot be determined or is not present
-    NoMemory            // not enough memory for completing the request
+    NotPresent = -1000,      // hardware input or output is not present or available
+    HWMalfunction,           // hardware is malfunctioning (can be returned by any ASIO function)
+    InvalidParameter,        // input parameter invalid
+    InvalidMode,             // hardware is in a bad mode or used in a bad mode
+    SPNotAdvancing,          // hardware is not running when sample position is inquired
+    NoClock,                 // sample clock or rate cannot be determined or is not present
+    NoMemory                 // not enough memory for completing the request
 }
 
 
@@ -113,14 +113,14 @@ Error :: enum c.long {
 //- - - - - - - - - - - - - - - - - - - - - - - - -
 
 TimeCode :: struct {
-    speed: f64,                  // speed relation (fraction of nominal speed)
-                                            // optional; set to 0. or 1. if not supported
-    timeCodeSamples: Samples,        // time in samples
-    flags: u64,                  // some information flags (see below)
+    speed: f64,                 // speed relation (fraction of nominal speed)
+                                // optional; set to 0. or 1. if not supported
+    timeCodeSamples: Samples,   // time in samples
+    flags: TimeCodeFlags,       // some information flags (see below)
     future: [64]u8,
 }
 
-TimeCodeFlags :: enum {
+TimeCodeFlags :: enum c.ulong {
     Valid                = 1,
     Running              = 1 << 1,
     Reverse              = 1 << 2,
@@ -131,17 +131,17 @@ TimeCodeFlags :: enum {
 }
 
 TimeInfo :: struct {
-    speed: f64,                  // absolute speed (1. = nominal)
-    systemTime: TimeStamp,             // system time related to samplePosition, in nanoseconds
-                                            // on mac, must be derived from Microseconds() (not UpTime()!)
-                                            // on windows, must be derived from timeGetTime()
+    speed: f64,                     // absolute speed (1. = nominal)
+    systemTime: TimeStamp,          // system time related to samplePosition, in nanoseconds
+                                    // on mac, must be derived from Microseconds() (not UpTime()!)
+                                    // on windows, must be derived from timeGetTime()
     samplePosition: Samples,
-    sampleRate: SampleRate,             // current rate
-    flags: u64,                    // (see below)
+    sampleRate: SampleRate,         // current rate
+    flags: TimeInfoFlags,           // (see below)
     reserved: [12]u8,
 }
 
-TimeInfoFlags :: enum
+TimeInfoFlags :: enum c.ulong
 {
     SystemTimeValid        = 1,            // must always be valid
     SamplePositionValid    = 1 << 1,       // must always be valid
@@ -153,7 +153,7 @@ TimeInfoFlags :: enum
 } 
 
 Time :: struct {               // both input/output
-    reserved: [4]c.long,              // must be 0
+    reserved: [4]c.long,       // must be 0
     timeInfo: TimeInfo,        // required
     timeCode: TimeCode,        // optional, evaluated if (timeCode.flags & kTcValid)
 } 
@@ -202,11 +202,11 @@ Callbacks :: struct{
 // asioMessage selectors
 MessageSelector :: enum c.long
 {
-    SelectorSupported = 1,    // selector in <value>, returns 1L if supported,
+    SelectorSupported = 1,      // selector in <value>, returns 1L if supported,
                                 // 0 otherwise
-    EngineVersion,            // returns engine (host) asio implementation version,
+    EngineVersion,              // returns engine (host) asio implementation version,
                                 // 2 or higher
-    ResetRequest,            // request driver reset. if accepted, this
+    ResetRequest,               // request driver reset. if accepted, this
                                 // will close the driver (ASIO_Exit() ) and
                                 // re-open it again (ASIO_Init() etc). some
                                 // drivers need to reconfigure for instance
@@ -216,28 +216,28 @@ MessageSelector :: enum c.long
                                 // to the application, there is no way to determine
                                 // if it gets accepted at this time (but it usually
                                 // will be).
-    BufferSizeChange,        // not yet supported, will currently always return 0L.
+    BufferSizeChange,           // not yet supported, will currently always return 0L.
                                 // for now, use ResetRequest instead.
                                 // once implemented, the new buffer size is expected
                                 // in <value>, and on success returns 1L
-    ResyncRequest,            // the driver went out of sync, such that
+    ResyncRequest,              // the driver went out of sync, such that
                                 // the timestamp is no longer valid. this
                                 // is a request to re-start the engine and
                                 // slave devices (sequencer). returns 1 for ok,
                                 // 0 if not supported.
-    LatenciesChanged,         // the drivers latencies have changed. The engine
+    LatenciesChanged,           // the drivers latencies have changed. The engine
                                 // will refetch the latencies.
-    SupportsTimeInfo,        // if host returns true here, it will expect the
+    SupportsTimeInfo,           // if host returns true here, it will expect the
                                 // callback bufferSwitchTimeInfo to be called instead
                                 // of bufferSwitch
-    SupportsTimeCode,        // 
-    MMCCommand,            // unused - value: number of commands, message points to mmc commands
-    SupportsInputMonitor,    // SupportsXXX return 1 if host supports this
-    SupportsInputGain,     // unused and undefined
-    SupportsInputMeter,    // unused and undefined
-    SupportsOutputGain,    // unused and undefined
-    SupportsOutputMeter,   // unused and undefined
-    Overload,              // driver detected an overload
+    SupportsTimeCode,           // 
+    MMCCommand,                 // unused - value: number of commands, message points to mmc commands
+    SupportsInputMonitor,       // SupportsXXX return 1 if host supports this
+    SupportsInputGain,          // unused and undefined
+    SupportsInputMeter,         // unused and undefined
+    SupportsOutputGain,         // unused and undefined
+    SupportsOutputMeter,        // unused and undefined
+    Overload,                   // driver detected an overload
 }
 
 //---------------------------------------------------------------------------------------------------
@@ -248,49 +248,49 @@ MessageSelector :: enum c.long
 //- - - - - - - - - - - - - - - - - - - - - - - - -
 
 DriverInfo :: struct {
-    asioVersion: c.long,        // currently, 2
-    driverVersion: c.long,        // driver specific
+    asioVersion: c.long,              // currently, 2
+    driverVersion: c.long,            // driver specific
     name: [32]u8,
     errorMessage: [124]u8,
-    sysRef: rawptr,            // on input: system reference
-                            // (Windows: application main window handle, Mac & SGI: 0)
+    sysRef: rawptr,                   // on input: system reference
+                                      // (Windows: application main window handle, Mac & SGI: 0)
 }
 
 ClockSource :: struct {
     index: c.long,                    // as used for SetClockSource()
     associatedChannel: c.long,        // for instance, S/PDIF or AES/EBU
-    associatedGroup: c.long,        // see channel groups (GetChannelInfo())
-    isCurrentSource: Bool,    // ASIOTrue if this is the current clock source
-    name: [32]u8,                // for user selection
+    associatedGroup: c.long,          // see channel groups (GetChannelInfo())
+    isCurrentSource: Bool,            // ASIOTrue if this is the current clock source
+    name: [32]u8,                     // for user selection
 }
 
 
 ChannelInfo :: struct {
-    channel: c.long,            // on input, channel index
-    isInput: Bool,        // on input
-    isActive: Bool,        // on exit
-    channelGroup: c.long,        // dto
-    type: SampleType,    // dto
-    name: [32]u8,            // dto
+    channel: c.long,                  // on input, channel index
+    isInput: Bool,                    // on input
+    isActive: Bool,                   // on exit
+    channelGroup: c.long,             // dto
+    type: SampleType,                 // dto
+    name: [32]u8,                     // dto
 }
 
 BufferInfo :: struct {
-    isInput: Bool,            // on input:  ASIOTrue: input, else output
-    channelNum: c.long,            // on input:  channel index
-    buffers: [2]rawptr,            // on output: double buffer addresses
+    isInput: Bool,                    // on input:  ASIOTrue: input, else output
+    channelNum: c.long,               // on input:  channel index
+    buffers: [2]rawptr,               // on output: double buffer addresses
 }
 
 
 FutureSelector :: enum c.long {
-    EnableTimeCodeRead = 1,    // no arguments
-    DisableTimeCodeRead,        // no arguments
-    SetInputMonitor,            // InputMonitor* in params
-    Transport,                    // TransportParameters* in params
-    SetInputGain,                // ChannelControls* in params, apply gain
-    GetInputMeter,                // ChannelControls* in params, fill meter
-    SetOutputGain,                // ChannelControls* in params, apply gain
-    GetOutputMeter,            // ChannelControls* in params, fill meter
-    CanInputMonitor,            // no arguments for CanXXX selectors
+    EnableTimeCodeRead = 1,           // no arguments
+    DisableTimeCodeRead,              // no arguments
+    SetInputMonitor,                  // InputMonitor* in params
+    Transport,                        // TransportParameters* in params
+    SetInputGain,                     // ChannelControls* in params, apply gain
+    GetInputMeter,                    // ChannelControls* in params, fill meter
+    SetOutputGain,                    // ChannelControls* in params, apply gain
+    GetOutputMeter,                   // ChannelControls* in params, fill meter
+    CanInputMonitor,                  // no arguments for CanXXX selectors
     CanTimeInfo,
     CanTimeCode,
     CanTransport,
@@ -303,29 +303,29 @@ FutureSelector :: enum c.long {
     //    DSD support
     //    The following extensions are required to allow switching
     //    and control of the DSD subsystem.
-    SetIoFormat            = 0x23111961,        /* ASIOIoFormat * in params.            */
-    GetIoFormat            = 0x23111983,        /* ASIOIoFormat * in params.            */
+    SetIoFormat            = 0x23111961,          /* ASIOIoFormat * in params.            */
+    GetIoFormat            = 0x23111983,          /* ASIOIoFormat * in params.            */
     CanDoIoFormat            = 0x23112004,        /* ASIOIoFormat * in params.            */
     
     // Extension for drop out detection
     CanReportOverload            = 0x24042012,    /* return ASE_SUCCESS if driver can detect and report overloads */
     
-    GetInternalBufferSamples    = 0x25042012    /* ASIOInternalBufferInfo * in params. Deliver size of driver internal buffering, return ASE_SUCCESS if supported */
+    GetInternalBufferSamples    = 0x25042012      /* ASIOInternalBufferInfo * in params. Deliver size of driver internal buffering, return ASE_SUCCESS if supported */
 }
 
 InputMonitor :: struct {
     input: c.long,        // this input was set to monitor (or off), -1: all
-    output: c.long,    // suggested output for monitoring the input (if so)
-    gain: c.long,        // suggested gain, ranging 0 - 0x7fffffffL (-inf to +12 dB)
-    state: Bool,    // ASIOTrue => on, ASIOFalse => off
-    pan: c.long,        // suggested pan, 0 => all left, 0x7fffffff => right
+    output: c.long,       // suggested output for monitoring the input (if so)
+    gain: c.long,         // suggested gain, ranging 0 - 0x7fffffffL (-inf to +12 dB)
+    state: Bool,          // ASIOTrue => on, ASIOFalse => off
+    pan: c.long,          // suggested pan, 0 => all left, 0x7fffffff => right
 }
 
 ChannelControls :: struct {
-    channel: c.long,            // on input, channel index
+    channel: c.long,      // on input, channel index
     isInput: Bool,        // on input
-    gain: c.long,                // on input,  ranges 0 thru 0x7fffffff
-    meter: c.long,                // on return, ranges 0 thru 0x7fffffff
+    gain: c.long,         // on input,  ranges 0 thru 0x7fffffff
+    meter: c.long,        // on return, ranges 0 thru 0x7fffffff
     future: [32]u8,
 }
 
@@ -333,7 +333,7 @@ TransportParameters :: struct {
     command: TransportParameterType,        // see enum below
     samplePosition: Samples,
     track: c.long,
-    trackSwitches: [16]c.long,        // 512 tracks on/off
+    trackSwitches: [16]c.long,              // 512 tracks on/off
     future: [64]u8,
 }
 
@@ -341,15 +341,15 @@ TransportParameterType :: enum c.long
 {
     Start = 1,
     Stop,
-    Locate,        // to samplePosition
+    Locate,             // to samplePosition
     PunchIn,
     PunchOut,
-    ArmOn,        // track
-    ArmOff,        // track
-    MonitorOn,    // track
-    MonitorOff,    // track
-    Arm,            // trackSwitches
-    Monitor        // trackSwitches
+    ArmOn,              // track
+    ArmOff,             // track
+    MonitorOn,          // track
+    MonitorOff,         // track
+    Arm,                // trackSwitches
+    Monitor             // trackSwitches
 }
 
 /*
@@ -490,7 +490,7 @@ foreign lib {
           other parameter will be zero, and ASE_OK is returned.
     */
     
-    GetLatencies :: proc(inputLatency: ^c.long, outputLatency: ^c.long) -> Error ---;
+    GetLatencies :: proc(inputLatency: ^c.long, outputLatency: ^c.long) -> Error ---
     /* Purpose:
           Returns the input and output latencies. This includes
           device specific delays, like FIFOs etc.
@@ -553,7 +553,7 @@ foreign lib {
           should be 0 in this case.
     */
     
-    CanSampleRate :: proc(sampleRate: SampleRate) -> Error ---;
+    CanSampleRate :: proc(sampleRate: SampleRate) -> Error ---
     /* Purpose:
           Inquires the hardware for the available sample rates.
         Parameter:
