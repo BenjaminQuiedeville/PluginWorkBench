@@ -72,9 +72,15 @@ Plugin_Host :: struct {
 
     audio_thread_status: ma.device_state,
     audio_file_status: Audio_File_Playback_Status,
+    
     // miniaudio stuff
+    miniaudio_context: ma.context_type,
+    miniaudio_context_config: ma.context_config,
     audio_device: ma.device,
     wav_decoder: ma.decoder,
+
+    audio_device_list: [10]cstring,
+    num_audio_devices: int,
 
     // plugin data
     dll_handle: dynlib.Library,
@@ -120,17 +126,13 @@ Asio_Backend :: struct {
     asio_callbacks: asio.Callbacks,
     buffer_infos: []asio.BufferInfo,
 
-    // miniaudio_context: ma.context_type,
-
     driver_names: [8]cstring,
     ndrivers: i32,
     driver_index: c.long,
 
     drivers: rawptr,
     audio_device: ^ma.device,
-    // input_interleaved_buffer: []u8,
-    // output_interleaved_buffer: []u8,
-
+    
     sample_format: ma.format,
     ninput_channels: i32,
     noutput_channels: i32,
@@ -147,6 +149,8 @@ Asio_Backend :: struct {
 //     Running,
 //     RequestToStop,
 // }
+
+Audio_Backend_Type :: enum { None, Asio, Miniaudio }
 
 Audio_File_Playback_Status :: enum {
     Stopped,
@@ -869,6 +873,13 @@ Command_Line_Arguments :: struct {
 }
 
 
+Dropdown_Box_Data :: struct {
+    position: rl.Rectangle,
+    text: cstring, 
+    active: c.int, 
+    edit: bool,
+}
+
 main :: proc() {
 
     // assert(len(os.args) >= 2)
@@ -934,43 +945,94 @@ main :: proc() {
 
 
     host: Plugin_Host
+    // set default sample rate and audio block size
     host.samplerate = 48000.0
-    host.buffer_size = 512
+    host.buffer_size = 128
+
 
     // miniaudio init
     ma_result: ma.result
+    miniaudio_backends := []ma.backend { .wasapi, .jack, .dsound, .winmm  }    
+    host.miniaudio_context_config = ma.context_config_init()
+    // context_config.custom.onContextInit = init_asio_backend_context
+    host.miniaudio_context_config.pUserData = &host
 
-    miniaudio_backends := []ma.backend { .wasapi, .jack, .dsound, .winmm  }
+    ma_result = ma.context_init(raw_data(miniaudio_backends[:]), cast(u32)len(miniaudio_backends), &host.miniaudio_context_config, &host.miniaudio_context)
 
+    if ma_result == .NO_BACKEND {
+        panic("[Miniaudio] - Found no drivers on this machine")
+    } else if ma_result != .SUCCESS {
+        fmt.println("[Miniaudio] - Error during context_init, error: ", ma_result)
+        panic("")
+    }
+    
+    #partial switch host.miniaudio_context.backend {
+        case .wasapi: { 
+            host.audio_device_list[host.num_audio_devices] = "Wasapi"
+            host.num_audio_devices += 1 
+        }
+        case .dsound: {
+            host.audio_device_list[host.num_audio_devices] = "Direct Sound"
+            host.num_audio_devices += 1 
+        }
+        case .jack: {
+            host.audio_device_list[host.num_audio_devices] = "Jack"
+            host.num_audio_devices += 1 
+        }
+        case .winmm: {
+            host.audio_device_list[host.num_audio_devices] = "Winmm"
+            host.num_audio_devices += 1 
+        }
+        case .coreaudio: {
+            host.audio_device_list[host.num_audio_devices] = "Core Audio"
+            host.num_audio_devices += 1 
+        }
+        case: {
+            panic("[Miniaudio] - Unsupported backend")
+        }
+    }
+
+    
+    // ASIO init
     asio_backend.host = &host
+    
     asio_backend.drivers = asio.driversAllocate()
     defer asio.driversDestroy(asio_backend.drivers)
 
+    for &name in asio_backend.driver_names {
+        name = cstring(raw_data(make([]u8, 32)))
+    }
+
     asio_backend.ndrivers = asio.getDriverNames(asio_backend.drivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
-    asio.loadDriver(asio_backend.drivers, "Focusrite USB ASIO")
+    
+    if asio_backend.ndrivers == 0 {
+        fmt.println("[ASIO] - No Asio driver present on this machine, fallback to miniaudio")
+    } else {    
+        for index in 0..<asio_backend.ndrivers {
+            host.audio_device_list[host.num_audio_devices] = asio_backend.driver_names[index] 
+            host.num_audio_devices += 1
+        }
+    }
 
-    init_asio_result := init_asio_stream(48000.0)
+    fmt.printfln("\n----- Found %d audio devices -----", host.num_audio_devices)
 
-    // context_config := ma.context_config_init()
-    // context_config.custom.onContextInit = init_asio_backend_context
-    // context_config.pUserData = &host
+    for name_index in 0..<host.num_audio_devices {
+        fmt.printfln("%d - %s", name_index, host.audio_device_list[name_index])
+    }
+    
 
-    // ma_result = ma.context_init(raw_data(miniaudio_backends[:]), cast(u32)len(miniaudio_backends), &context_config, &asio_backend.miniaudio_context)
-    // assert(ma_result == .SUCCESS)
-    // asio_backend.miniaudio_context.backend = .custom
+    // asio.loadDriver(asio_backend.drivers, "Focusrite USB ASIO")
+    // init_asio_result := init_asio_stream(48000.0)
 
+        
 
     // play_back_infos: [^]ma.device_info
     // play_back_count: u32
     // capture_infos: [^]ma.device_info
     // capture_count: u32
 
-    // ma_result = ma.context_get_devices(&asio_backend.miniaudio_context, &play_back_infos, &play_back_count, &capture_infos, &capture_count)
+    // ma_result = ma.context_get_devices(&host.miniaudio_context, &play_back_infos, &play_back_count, &capture_infos, &capture_count)
     // assert(ma_result == .SUCCESS)
-
-    // for device_index in 0..<play_back_count {
-    //     fmt.printf("%d - %s\n", device_index, play_back_infos[device_index].name)
-    // }
 
 
     // init_result := init_miniaudio_device(&host, host.samplerate, host.buffer_size)
@@ -1047,8 +1109,6 @@ main :: proc() {
 
     rewind_button_pressed: bool
 
-    samplerate_box_active: i32 = 1
-    samplerate_box_edit := false
     selected_samplerate: f64 = host.samplerate
     available_samplerates := [3]f64 { 44100.0, 48000.0, 96000.0 }
 
@@ -1064,6 +1124,28 @@ main :: proc() {
     plugin_param_pos := rl.Rectangle {0, info_panel_pos.height, 450, window_height-info_panel_pos.height}
     scopes_pos := rl.Rectangle {plugin_param_pos.width, plugin_param_pos.y, window_width-plugin_param_pos.x, window_height-info_panel_pos.height}
 
+    samplerate_dropdown := Dropdown_Box_Data {
+        position = {5, info_panel_pos.height - 30 - 10, 80, 30},
+        text = "44100;48000;96000",
+        active = 1,
+        edit = false,
+    }
+
+    audio_driver_dropdown := Dropdown_Box_Data {
+        position = {info_panel_pos.width - 120, info_panel_pos.y +30 , 100, 30},
+        text = "",
+        active = 1,
+        edit = false,
+    }
+
+    device_list_builder := strings.builder_make(0, 500)
+    
+    for name_index in 0..<host.num_audio_devices {
+        strings.write_bytes(&device_list_builder, (transmute([^]u8)host.audio_device_list[name_index])[0:32])
+        strings.write_byte(&device_list_builder, ';')
+    }
+
+    audio_driver_dropdown.text = strings.to_cstring(&device_list_builder)
 
     scope_box_active: i32
     scope_box_edit: bool = false
@@ -1224,15 +1306,17 @@ main :: proc() {
                 str_size = rl.MeasureTextEx(gui_font, label_string, font_size, font_spacing)
                 rl.GuiLabel({5, info_panel_pos.y + 25 + 60, str_size.x, 20}, label_string)
 
-                samplerate_box_pos := rl.Rectangle {5, info_panel_pos.height - 30 - 10, 80, 30}
-                if cast(bool)rl.GuiDropdownBox(samplerate_box_pos, "44100;48000;96000", &samplerate_box_active, samplerate_box_edit) {
-                    samplerate_box_edit = !samplerate_box_edit
 
-                    selected_samplerate = available_samplerates[samplerate_box_active]
+                if cast(bool)rl.GuiDropdownBox(samplerate_dropdown.position, samplerate_dropdown.text, &samplerate_dropdown.active, samplerate_dropdown.edit) {
+                    samplerate_dropdown.edit = !samplerate_dropdown.edit
+
+                    selected_samplerate = available_samplerates[samplerate_dropdown.active]
                 }
 
+                if cast(bool)rl.GuiDropdownBox(audio_driver_dropdown.position, audio_driver_dropdown.text, &audio_driver_dropdown.active, audio_driver_dropdown.edit) {}
+
                 audio_running_label: cstring = audio_running_checked ? "Audio On" : "Audio Off"
-                rl.GuiCheckBox({samplerate_box_pos.width + 10, samplerate_box_pos.y, 20, 20}, audio_running_label, &audio_running_checked)
+                rl.GuiCheckBox({samplerate_dropdown.position.width + 10, samplerate_dropdown.position.y, 20, 20}, audio_running_label, &audio_running_checked)
 
                 /* si jechange samplerate {
                     couper proprement l'audio stream,
@@ -1286,9 +1370,9 @@ main :: proc() {
     asio.DisposeBuffers()
     asio.Exit()
 
-    // ma_result = ma.device_stop(&host.audio_device)
-    // ma.device_uninit(&host.audio_device)
-    // ma.context_uninit(&asio_backend.miniaudio_context)
+    ma_result = ma.device_stop(&host.audio_device)
+    ma.device_uninit(&host.audio_device)
+    ma.context_uninit(&host.miniaudio_context)
 
     vst_close_plugin(&host)
 
