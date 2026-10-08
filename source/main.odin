@@ -92,6 +92,12 @@ Plugin_Host :: struct {
     param_event_fifo: EventFIFO,
 }
 
+Info_Panel_State :: struct {}
+Input_Panel_State :: struct {}
+Parameter_Panel_State :: struct {}
+Scopes_Panel_State :: struct {}
+
+
 Parameter :: struct {
     min: f64,                   // clap/Faust only
     max: f64,                   // clap/Faust only
@@ -872,14 +878,6 @@ Command_Line_Arguments :: struct {
     show_plugin_gui: bool        `args:"name=show-plugin-gui" usage: "To automaticaly show the plugin gui"`,
 }
 
-
-Dropdown_Box_Data :: struct {
-    position: rl.Rectangle,
-    text: cstring, 
-    active: c.int, 
-    edit: bool,
-}
-
 main :: proc() {
 
     // assert(len(os.args) >= 2)
@@ -1107,6 +1105,17 @@ main :: proc() {
     // ma.device_start(&host.audio_device)
     // host.audio_thread_status = .started
 
+
+    // gui state variables
+    
+    /*
+    définir dans des variables les positions dont on a besoin pour calculer des positions relatives
+    si une position n'est pas utilisée comme réféence pour une autre position -> inline
+    ne pas forcément faire des structs pour les states récurrents
+    sauf si j'ai besoin de factoriser certaines fonctions du gui dans des fonctions, là peut etre faire des structs
+    
+    */
+
     rewind_button_pressed: bool
 
     selected_samplerate: f64 = host.samplerate
@@ -1118,34 +1127,33 @@ main :: proc() {
     input_select_active: i32
     input_select_edit: bool = false
 
-
     info_panel_pos := rl.Rectangle {0, 0, 300, 150}
     input_panel_pos := rl.Rectangle {info_panel_pos.width, 0, window_width-info_panel_pos.width, info_panel_pos.height}
     plugin_param_pos := rl.Rectangle {0, info_panel_pos.height, 450, window_height-info_panel_pos.height}
     scopes_pos := rl.Rectangle {plugin_param_pos.width, plugin_param_pos.y, window_width-plugin_param_pos.x, window_height-info_panel_pos.height}
 
-    samplerate_dropdown := Dropdown_Box_Data {
-        position = {5, info_panel_pos.height - 30 - 10, 80, 30},
-        text = "44100;48000;96000",
-        active = 1,
-        edit = false,
-    }
+    samplerate_box_text: cstring = "44100;48000;96000"
+    selected_samplerate_index: c.int = 1
+    samplerate_box_edit := false
 
-    audio_driver_dropdown := Dropdown_Box_Data {
-        position = {info_panel_pos.width - 120, info_panel_pos.y +30 , 100, 30},
-        text = "",
-        active = 1,
-        edit = false,
-    }
+    audio_device_box_text: cstring = ""
+    selected_audio_device: c.int = 1
+    audio_device_box_edit := false
 
     device_list_builder := strings.builder_make(0, 500)
     
     for name_index in 0..<host.num_audio_devices {
-        strings.write_bytes(&device_list_builder, (transmute([^]u8)host.audio_device_list[name_index])[0:32])
-        strings.write_byte(&device_list_builder, ';')
+        
+        name := transmute([^]u8)(host.audio_device_list[name_index])
+        
+        for char_index := 0; name[char_index] != 0; char_index += 1 {
+            strings.write_byte(&device_list_builder, name[char_index])
+        }
+        
+        if name_index != host.num_audio_devices-1 { strings.write_byte(&device_list_builder, ';') }
     }
 
-    audio_driver_dropdown.text = strings.to_cstring(&device_list_builder)
+    audio_device_box_text = strings.to_cstring(&device_list_builder)
 
     scope_box_active: i32
     scope_box_edit: bool = false
@@ -1307,17 +1315,19 @@ main :: proc() {
                 rl.GuiLabel({5, info_panel_pos.y + 25 + 60, str_size.x, 20}, label_string)
 
 
-                if cast(bool)rl.GuiDropdownBox(samplerate_dropdown.position, samplerate_dropdown.text, &samplerate_dropdown.active, samplerate_dropdown.edit) {
-                    samplerate_dropdown.edit = !samplerate_dropdown.edit
-
-                    selected_samplerate = available_samplerates[samplerate_dropdown.active]
-                }
-
-                if cast(bool)rl.GuiDropdownBox(audio_driver_dropdown.position, audio_driver_dropdown.text, &audio_driver_dropdown.active, audio_driver_dropdown.edit) {}
 
                 audio_running_label: cstring = audio_running_checked ? "Audio On" : "Audio Off"
-                rl.GuiCheckBox({samplerate_dropdown.position.width + 10, samplerate_dropdown.position.y, 20, 20}, audio_running_label, &audio_running_checked)
+                rl.GuiCheckBox({info_panel_pos.width -100, info_panel_pos.y+30, 20, 20}, audio_running_label, &audio_running_checked)
 
+                if cast(bool)rl.GuiDropdownBox({5, info_panel_pos.height - 40 , 200, 30}, audio_device_box_text, &selected_audio_device, audio_device_box_edit) {
+                    audio_device_box_edit = !audio_device_box_edit
+                }
+
+                // samplerate dropdown box
+                if cast(bool)rl.GuiDropdownBox({info_panel_pos.width - 90, info_panel_pos.height - 40, 80, 30}, samplerate_box_text, &selected_samplerate_index, samplerate_box_edit) {
+                    samplerate_box_edit = !samplerate_box_edit
+                    selected_samplerate = available_samplerates[selected_samplerate_index]
+                }
                 /* si jechange samplerate {
                     couper proprement l'audio stream,
                     réouvrir un nouvel audio stream avec les nouveaux settings
