@@ -20,8 +20,8 @@ pAsioDrivers AsioDrivers_allocate() {
     asioDrivers = drivers;
 
     return (pAsioDrivers)drivers; 
-
 }
+
 void AsioDrivers_destroy(pAsioDrivers ptr) {
 
     assert(ptr == asioDrivers && "asioDrivers ptr passed not corresponding to global value");

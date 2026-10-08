@@ -70,7 +70,7 @@ Plugin_Host :: struct {
     input_buffers: [][]f32,
     output_buffers: [][]f32,
 
-    audio_thread_status: ma.device_state,
+    audio_thread_status: Audio_Thread_Status,
     audio_file_status: Audio_File_Playback_Status,
     
     // miniaudio stuff
@@ -81,6 +81,8 @@ Plugin_Host :: struct {
 
     audio_device_list: [10]cstring,
     num_audio_devices: int,
+    loaded_device_index: i32,
+    backend_type: Audio_Backend_Type,
 
     // plugin data
     dll_handle: dynlib.Library,
@@ -137,7 +139,6 @@ Asio_Backend :: struct {
     driver_index: c.long,
 
     drivers: rawptr,
-    audio_device: ^ma.device,
     
     sample_format: ma.format,
     ninput_channels: i32,
@@ -150,11 +151,12 @@ Asio_Backend :: struct {
     uses_output_ready_notification: bool,
 }
 
-// Audio_Thread_Status :: enum {
-//     Stopped,
-//     Running,
-//     RequestToStop,
-// }
+Audio_Thread_Status :: enum {
+    Uninitialized,
+    Running,
+    Stopped, // init but non running
+    RequestToStop, // is going to stop 
+}
 
 Audio_Backend_Type :: enum { None, Asio, Miniaudio }
 
@@ -185,7 +187,7 @@ set_odin_context_main_allocator :: proc "contextless" () -> runtime.Context {
     return context
 }
 
-init_miniaudio_device :: proc(host: ^Plugin_Host, samplerate: f64, buffer_size: u32) -> ma.result {
+init_miniaudio_device :: proc(host: ^Plugin_Host) -> bool {
 
     device_config := ma.device_config_init(.duplex)
     device_config.capture.format = .f32
@@ -194,27 +196,27 @@ init_miniaudio_device :: proc(host: ^Plugin_Host, samplerate: f64, buffer_size: 
     device_config.playback.format = .f32
     device_config.playback.channels = 2
     device_config.playback.shareMode = .shared
-    device_config.sampleRate = u32(samplerate)
-    device_config.periodSizeInFrames = buffer_size
+    device_config.sampleRate = u32(host.samplerate)
+    device_config.periodSizeInFrames = host.buffer_size
     device_config.dataCallback = miniaudio_data_callback
     device_config.pUserData = host
 
-    // ma_result := ma.device_init(&asio_backend.miniaudio_context, &device_config, &host.audio_device)
+    ma_result := ma.device_init(&host.miniaudio_context, &device_config, &host.audio_device)
     // assert(ma_result == .SUCCESS, "Error during initialisation of miniaudio device")
-
-    return .SUCCESS
+    
+    return ma_result == .SUCCESS 
 }
 
-stop_audio_stream :: proc(host: ^Plugin_Host) {
-    host.audio_thread_status = .stopping
+stop_miniaudio_stream :: proc(host: ^Plugin_Host) {
+    host.audio_thread_status = .RequestToStop
     ma.device_stop(&host.audio_device)
-    host.audio_thread_status = .stopped
+    host.audio_thread_status = .Stopped
 }
 
-destroy_audio_stream :: proc(host: ^Plugin_Host) {
-    host.audio_thread_status = .stopping
+destroy_miniaudio_stream :: proc(host: ^Plugin_Host) {
+    host.audio_thread_status = .RequestToStop
     ma.device_uninit(&host.audio_device)
-    host.audio_thread_status = .stopped
+    host.audio_thread_status = .Stopped
 }
 
 miniaudio_data_callback :: proc "c" (device: ^ma.device, output: rawptr, input: rawptr, nsamples: u32) {
@@ -245,12 +247,12 @@ main_audio_procedure :: proc(host: ^Plugin_Host, nsamples: u32) {
     thread_status := intrin.atomic_load(&host.audio_thread_status)
     audio_file_status := intrin.atomic_load(&host.audio_file_status)
 
-    if thread_status != .started {
+    if thread_status != .Running {
         return
     }
 
 
-    when false {
+    when true {
         frames_decoded: u64
 
         if audio_file_status == .RequestRewind {
@@ -478,7 +480,7 @@ process_asio_message :: proc "c" (selector: asio.MessageSelector, value: c.long,
 
     switch selector {
         case .SelectorSupported: {
-
+        
             #partial switch asio.MessageSelector(value) {
                 case .EngineVersion, .ResetRequest, .SupportsTimeInfo, .SupportsInputMonitor: {
                     return 1
@@ -490,7 +492,7 @@ process_asio_message :: proc "c" (selector: asio.MessageSelector, value: c.long,
         case .ResetRequest: {
 
             uninit_asio_stream()
-            init_asio_stream(asio_backend.samplerate)
+            init_asio_stream(asio_backend.host, asio_backend.samplerate)
             asio.Start()
 
             // return 1
@@ -513,96 +515,18 @@ process_asio_message :: proc "c" (selector: asio.MessageSelector, value: c.long,
     return 0
 }
 
-
-// Asio va appeler le callback de process, dedans on appelle ma.device_handle_backend_data_callback
-// qui ensuite va appeler la fonction de process miniaudio qu'on passe au device_config
-init_asio_backend_context :: proc "c" (pContext: ^ma.context_type, pConfig: ^ma.context_config, callbacks: ^ma.backend_callbacks) -> ma.result {
-    // le passer au context_config.custom.oncontextinit
-    // ici on init le driver ASIO, et on récupère tous les devices dispos
-    context = set_odin_context_main_allocator()
-
-    asio_backend.drivers = asio.driversAllocate()
-
-    for &name in asio_backend.driver_names {
-        name = cstring(raw_data(make([]u8, 32)))
-    }
-
-    asio_backend.ndrivers = asio.getDriverNames(asio_backend.drivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
-
-
-    callbacks.onContextInit             = init_asio_backend_context
-    callbacks.onContextUninit           = uninit_asio_backend_context
-    callbacks.onContextEnumerateDevices = enumerate_asio_devices
-    callbacks.onContextGetDeviceInfo    = get_asio_context_device_info
-    callbacks.onDeviceInit              = init_asio_device
-    callbacks.onDeviceUninit            = uninit_asio_device
-    callbacks.onDeviceStart             = start_asio_device
-    callbacks.onDeviceStop              = stop_asio_device
-
-    asio.driversDestroy(asio_backend.drivers)
-
-    return .SUCCESS
-}
-
-
-uninit_asio_backend_context :: proc "c" (pContext: ^ma.context_type) -> ma.result {
-    context = set_odin_context_main_allocator()
-
-    asio.driversDestroy(asio_backend.drivers)
-    asio_backend.drivers = nil
-
-    return .SUCCESS
-}
-
-enumerate_asio_devices :: proc "c" (pContext: ^ma.context_type, enum_callback: ma.enum_devices_callback_proc, pUserData: rawptr) -> ma.result {
-    // donner les devices récupérés dans onContextInit
-    context = set_odin_context_main_allocator()
-
-    for driver_index in 0..<asio_backend.ndrivers {
-
-        type := ma.device_type.playback
-        info: ma.device_info
-
-        name := asio_backend.driver_names[driver_index]
-
-        mem.copy(raw_data(info.id.custom.s[:]), transmute([^]u8)name, len(name))
-        mem.copy(raw_data(info.name[:]), transmute([^]u8)name, len(name))
-        result := enum_callback(pContext, type, &info, pUserData)
-
-        if !result { break }
-    }
-
-    return .SUCCESS
-}
-
-get_asio_context_device_info :: proc "c" (ma_context: ^ma.context_type, device_type: ma.device_type, device_id: ^ma.device_id, device_info: ^ma.device_info) -> ma.result {
-    context = set_odin_context_main_allocator()
-
-    if asio_backend.audio_device == nil { return .NO_DEVICE }
-
-    mem.zero_item(device_info)
-
-    mem.copy(raw_data(device_info.name[:]),
-            transmute([^]u8)(asio_backend.driver_names[asio_backend.driver_index]), 32)
-
-    device_info.nativeDataFormatCount = 1
-    // device_info.nativedataFormats[0] = { format = .f32, channels = 2}
-
-    return .SUCCESS
-}
-
-init_asio_stream :: proc(wanted_samplerate: f64) -> ma.result {
-    asio_error: asio.Error
-
+init_asio_stream :: proc(host: ^Plugin_Host, wanted_samplerate: f64) -> bool {
+    
+    context.allocator = get_asio_allocator()
+    
     driver_info: asio.DriverInfo
     driver_info.asioVersion = 2
 
-    fmt.printf("[ASIO] - asioVersion:   %d\n driverVersion: %d\n Name:          %s\n ErrorMessage:  %s\n",
-               driver_info.asioVersion, driver_info.driverVersion,
-               string(driver_info.name[:]), string(driver_info.errorMessage[:]))
+    // fmt.printf("[ASIO] - asioVersion:   %d\n driverVersion: %d\n Name:          %s\n ErrorMessage:  %s\n",
+    //            driver_info.asioVersion, driver_info.driverVersion,
+    //            string(driver_info.name[:]), string(driver_info.errorMessage[:]))
 
 
-    driver_name := asio_backend.driver_names[2]
     // driver_name := asio_backend.driver_names[3]
 
     // asio_backend.drivers = asio.driversAllocate()
@@ -610,9 +534,12 @@ init_asio_stream :: proc(wanted_samplerate: f64) -> ma.result {
 
     asio_backend.driver_index = asio.getCurrentDriverIndex(asio_backend.drivers)
 
+    fmt.println("[ASIO] - Init", asio_backend.driver_names[asio_backend.driver_index])
+
     if asio.Init(&driver_info) != .OK {
         asio.Exit()
-        return .ERROR
+        fmt.println("[ASIO] - Failed to init", asio_backend.driver_names[asio_backend.driver_index])
+        return false
     }
 
     asio_backend.asio_callbacks.bufferSwitch = switch_asio_buffers
@@ -623,7 +550,7 @@ init_asio_stream :: proc(wanted_samplerate: f64) -> ma.result {
 
     if asio.GetChannels(&asio_backend.ninput_channels, &asio_backend.noutput_channels) != .OK {
         asio.Exit()
-        return .ERROR
+        return false
     }
 
     asio_backend.host.ninput_channels = asio_backend.ninput_channels 
@@ -632,10 +559,11 @@ init_asio_stream :: proc(wanted_samplerate: f64) -> ma.result {
     min_size, max_size, prefered_size, granularity: i32
     if asio.GetBufferSize(&min_size, &max_size, &prefered_size, &granularity) != .OK {
         asio.Exit()
-        return .ERROR
+        return false
     }
 
     asio_backend.buffer_size = prefered_size
+    host.buffer_size = u32(asio_backend.buffer_size)
 
     clock_sources: [4]asio.ClockSource
     num_sources: i32 = len(clock_sources)
@@ -669,6 +597,8 @@ init_asio_stream :: proc(wanted_samplerate: f64) -> ma.result {
 
         asio_backend.samplerate = 44100.0
     }
+
+    host.samplerate = asio_backend.samplerate
 
     //asio_backend.samplerate
     fmt.println("[ASIO] - samplerate at init time: ", asio_backend.samplerate, "Hz")
@@ -705,7 +635,7 @@ init_asio_stream :: proc(wanted_samplerate: f64) -> ma.result {
     {
         asio.DisposeBuffers()
         asio.Exit()
-        return .ERROR
+        return false
     }
 
     for &buffer_info in asio_backend.buffer_infos {
@@ -750,76 +680,23 @@ init_asio_stream :: proc(wanted_samplerate: f64) -> ma.result {
 
 
     asio.GetLatencies(&asio_backend.input_latency, &asio_backend.output_latency)
-    fmt.printfln("Input ASIO latency: %d samples \nOutput ASIO latency: %d samlples", asio_backend.input_latency, asio_backend.output_latency)
+    fmt.printfln("[ASIO] - Input/Output ASIO latency: %d/%d samples", asio_backend.input_latency, asio_backend.output_latency)
 
-    return .SUCCESS
+    fmt.println("[ASIO] - Successfully init", asio_backend.driver_names[asio_backend.driver_index])
+    
+    return true
 }
 
 uninit_asio_stream :: proc() {
 
-    asio.Stop()
+    stop_asio_stream()
     asio.DisposeBuffers()
     asio.Exit()
-
-    asio_backend.audio_device = nil
 
     vmem.arena_destroy(&asio_backend.arena)
 }
 
-init_asio_device :: proc "c" (device: ^ma.device, config: ^ma.device_config, playback_descriptor, capture_descriptor: ^ma.device_descriptor) -> ma.result {
-    // ici on initialise tout ce qu'on peut du moteur asio
-    // Init,  ASIOCreateBuffers
-
-    context = runtime.default_context()
-    context.allocator = get_asio_allocator()
-
-
-    // -------
-
-    init_asio_stream(cast(f64)config.sampleRate)
-
-    config.sampleRate = cast(u32)asio_backend.samplerate
-    config.periodSizeInFrames = cast(u32)asio_backend.buffer_size
-
-
-    // asio_backend.input_interleaved_buffer = make([]u8, asio_backend.buffer_size * asio_backend.frame_size_bytes * asio_backend.ninput_channels)
-
-    capture_descriptor.shareMode = .shared
-    capture_descriptor.format = asio_backend.sample_format
-    capture_descriptor.channels = cast(u32)asio_backend.ninput_channels
-    capture_descriptor.sampleRate = cast(u32)asio_backend.samplerate
-    capture_descriptor.periodSizeInFrames = cast(u32)asio_backend.buffer_size
-
-    ma.channel_map_init_standard(.default, raw_data(capture_descriptor.channelMap[:]), ma.MAX_CHANNELS, cast(u32)asio_backend.ninput_channels)
-
-
-
-    // asio_backend.output_interleaved_buffer = make([]u8, asio_backend.buffer_size * asio_backend.frame_size_bytes * asio_backend.noutput_channels)
-
-    playback_descriptor.shareMode = .shared
-    playback_descriptor.format = asio_backend.sample_format
-    playback_descriptor.channels = cast(u32)asio_backend.noutput_channels
-    playback_descriptor.sampleRate = cast(u32)asio_backend.samplerate
-    playback_descriptor.periodSizeInFrames = cast(u32)asio_backend.buffer_size
-
-    ma.channel_map_init_standard(.default, raw_data(playback_descriptor.channelMap[:]), ma.MAX_CHANNELS, cast(u32)asio_backend.noutput_channels)
-
-    asio_backend.audio_device = device
-
-    return .SUCCESS
-}
-
-uninit_asio_device :: proc "c" (pDevice: ^ma.device) -> ma.result {
-
-    context = runtime.default_context()
-    context.allocator = get_asio_allocator()
-
-    uninit_asio_stream()
-
-    return .SUCCESS
-}
-
-start_asio_stream :: proc() -> ma.result {
+start_asio_stream :: proc() -> bool {
     for channel_index in 0..<asio_backend.noutput_channels {
         info := &asio_backend.buffer_infos[asio_backend.ninput_channels + channel_index]
 
@@ -830,25 +707,30 @@ start_asio_stream :: proc() -> ma.result {
     error := asio.Start()
     if error != .OK {
         fmt.println("[ASIO] - asio.Start failed with error: ", error)
-        return .ERROR
+        return false
     }
 
-    fmt.println("[ASIO] - Starting processing")
-    return .SUCCESS
+    fmt.println("[ASIO] - Start processing")
+    return true
 }
 
-start_asio_device :: proc "c" (device: ^ma.device) -> ma.result {
-    // Start
-    context = set_odin_context_main_allocator()
-
-
-    return .SUCCESS
+stop_asio_stream :: proc() -> bool {
+    result := asio.Stop()
+    
+    if result == .NotPresent {
+        fmt.println("[ASIO] - asio.Stop returned NotPresent => no stream to stop")
+        return false
+    }
+    
+    if result != .OK {
+        fmt.println("[ASIO] - asio.Stop failed with error: ", result)
+        return false 
+    }
+    
+    fmt.println("[ASIO] - Stop processing")
+    return true
 }
 
-stop_asio_device :: proc "c" (pDevice: ^ma.device) -> ma.result {
-    // Stop
-    return asio.Stop() == .OK ? .SUCCESS : .ERROR
-}
 
 // read_from_asio_device :: proc "c" (pDevice: ^ma.device, pFrames: rawptr, frameCount: u32, pFramesRead: ^u32) -> ma.result {
 //     return .SUCCESS
@@ -947,6 +829,30 @@ main :: proc() {
     host.samplerate = 48000.0
     host.buffer_size = 128
 
+    host.num_audio_devices = 0
+
+    // ASIO init
+    asio_backend.host = &host
+    
+    asio_backend.drivers = asio.driversAllocate()
+    defer asio.driversDestroy(asio_backend.drivers)
+
+    for &name in asio_backend.driver_names {
+        name = cstring(raw_data(make([]u8, 32)))
+    }
+
+    asio_backend.ndrivers = asio.getDriverNames(asio_backend.drivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
+    
+    if asio_backend.ndrivers == 0 {
+        fmt.println("[ASIO] - No Asio driver present on this machine, fallback to miniaudio")
+    } else {    
+        for index in 0..<asio_backend.ndrivers {
+            host.audio_device_list[host.num_audio_devices] = asio_backend.driver_names[index] 
+            host.num_audio_devices += 1
+        }
+    }
+
+
 
     // miniaudio init
     ma_result: ma.result
@@ -991,36 +897,47 @@ main :: proc() {
     }
 
     
-    // ASIO init
-    asio_backend.host = &host
-    
-    asio_backend.drivers = asio.driversAllocate()
-    defer asio.driversDestroy(asio_backend.drivers)
-
-    for &name in asio_backend.driver_names {
-        name = cstring(raw_data(make([]u8, 32)))
-    }
-
-    asio_backend.ndrivers = asio.getDriverNames(asio_backend.drivers, raw_data(asio_backend.driver_names[:]), len(asio_backend.driver_names))
-    
-    if asio_backend.ndrivers == 0 {
-        fmt.println("[ASIO] - No Asio driver present on this machine, fallback to miniaudio")
-    } else {    
-        for index in 0..<asio_backend.ndrivers {
-            host.audio_device_list[host.num_audio_devices] = asio_backend.driver_names[index] 
-            host.num_audio_devices += 1
-        }
-    }
-
     fmt.printfln("\n----- Found %d audio devices -----", host.num_audio_devices)
 
     for name_index in 0..<host.num_audio_devices {
         fmt.printfln("%d - %s", name_index, host.audio_device_list[name_index])
     }
     
+    { // try to load the drivers in order, keeps the first one as default
+        driver_loaded := false
+        
+        for driver_index in 0..<host.num_audio_devices {
+            if driver_index < int(asio_backend.ndrivers) {
+                driver_loaded = asio.loadDriver(asio_backend.drivers, host.audio_device_list[driver_index])
+                
+                if driver_loaded {
+                    driver_init := init_asio_stream(&host, host.samplerate)
+                    host.audio_thread_status = .Stopped
+                    
+                    if !driver_init {
+                        uninit_asio_stream() 
+                        asio.removeCurrentDriver(asio_backend.drivers)
+                        driver_loaded = false
+                    }
+                }
+            } else {
+                driver_loaded = init_miniaudio_device(&host)
+            }
+            
+            if driver_loaded { 
+                fmt.println("Loaded driver:", host.audio_device_list[driver_index])
+                host.loaded_device_index = i32(driver_index)
+                
+                host.backend_type = driver_index < int(asio_backend.ndrivers) ? .Asio : .Miniaudio
+                break 
+            }
+        }
+        
+        if !driver_loaded {
+            panic("No driver would load")
+        }        
+    }    
 
-    // asio.loadDriver(asio_backend.drivers, "Focusrite USB ASIO")
-    // init_asio_result := init_asio_stream(48000.0)
 
         
 
@@ -1132,12 +1049,13 @@ main :: proc() {
     plugin_param_pos := rl.Rectangle {0, info_panel_pos.height, 450, window_height-info_panel_pos.height}
     scopes_pos := rl.Rectangle {plugin_param_pos.width, plugin_param_pos.y, window_width-plugin_param_pos.x, window_height-info_panel_pos.height}
 
-    samplerate_box_text: cstring = "44100;48000;96000"
-    selected_samplerate_index: c.int = 1
+    //@TODO faire en sorte de sélectionner la samplerate choisie au démarrage
+    samplerate_box_text: cstring = "44100 kHz;48000 kHz;96000 kHz;192000 kHz"
+    selected_samplerate_index: c.int = 1 
     samplerate_box_edit := false
 
     audio_device_box_text: cstring = ""
-    selected_audio_device: c.int = 1
+    selected_audio_device: c.int = host.loaded_device_index
     audio_device_box_edit := false
 
     device_list_builder := strings.builder_make(0, 500)
@@ -1157,8 +1075,8 @@ main :: proc() {
 
     scope_box_active: i32
     scope_box_edit: bool = false
-    audio_is_running := false
-    audio_running_checked := audio_is_running
+    audio_should_run := false
+    audio_running_checked := audio_should_run
 
 
     for !rl.WindowShouldClose() {
@@ -1169,45 +1087,83 @@ main :: proc() {
             intrin.atomic_store(&host.audio_file_status, .RequestRewind)
         }
 
-        if audio_running_checked != audio_is_running {
-            audio_is_running = audio_running_checked
+        if audio_running_checked != audio_should_run {
+            audio_should_run = audio_running_checked
 
-            if audio_is_running {
+            if audio_should_run {
                 // start
                 // ma.device_start(&host.audio_device)
-                if start_asio_stream() == .SUCCESS {
-                    host.audio_thread_status = .started
+                
+                if start_asio_stream() {
+                    host.audio_thread_status = .Running
 
                 } else {
-                    audio_is_running = false
+                    audio_should_run = false
                     audio_running_checked = false
                 }
 
             } else {
                 // stop
-                stop_audio_stream(&host)
-                host.audio_thread_status = .stopped
-
+                stop_asio_stream()
+                
+                host.audio_thread_status = .Stopped
             }
-
         }
 
         if selected_samplerate != host.samplerate {
             host.samplerate = selected_samplerate
-
+            
+            panic("need to update implementation")
+            
             // stop and uninit audio stream
-            destroy_audio_stream(&host)
+            // destroy_audio_stream(&host)
 
             // reset plugin
 
-            vst_update_processing_setup(&host.vst_host, host.samplerate, cast(i32)host.buffer_size)
+            // vst_update_processing_setup(&host.vst_host, host.samplerate, cast(i32)host.buffer_size)
 
             // restart audio stream
-            init_miniaudio_device(&host, host.samplerate, host.buffer_size)
-            ma.device_start(&host.audio_device)
-            host.audio_thread_status = .started
+            // init_miniaudio_device(&host)
+            // ma.device_start(&host.audio_device)
+            // host.audio_thread_status = .started
 
         }
+
+        if selected_audio_device != host.loaded_device_index {
+            
+            host.loaded_device_index = selected_audio_device
+            
+            uninit_asio_stream()
+            host.audio_thread_status = .Uninitialized
+            asio.removeCurrentDriver(asio_backend.drivers)
+
+            load_new_asio_device: {
+                if host.loaded_device_index >= asio_backend.ndrivers {
+                    break load_new_asio_device    
+                }            
+                
+                if !asio.loadDriver(asio_backend.drivers, host.audio_device_list[host.loaded_device_index]) {
+                    fmt.println("[ASIO] - Change of ASIO device, error during driver load")
+                    break load_new_asio_device    
+                }
+                
+                if !init_asio_stream(&host, host.samplerate) {
+                    fmt.println("[ASIO] - Change of ASIO Device, error during initialization of asio stream")
+                    break load_new_asio_device
+                }
+                
+                host.audio_thread_status = .Stopped
+                
+                if audio_should_run {
+                    if start_asio_stream() {
+                        host.audio_thread_status = .Running 
+                    }
+                }
+            }           
+            
+        
+        }
+
 
         // Draw GUI
         {
@@ -1310,7 +1266,7 @@ main :: proc() {
                 str_size = rl.MeasureTextEx(gui_font, label_string, font_size, font_spacing)
                 rl.GuiLabel({5, info_panel_pos.y + 25 + 20 + 20, str_size.x, 20}, label_string)
 
-                label_string = rl.TextFormat("Buffer size: %d", host.audio_device.playback.internalPeriodSizeInFrames)
+                label_string = rl.TextFormat("Buffer size: %d", host.buffer_size)
                 str_size = rl.MeasureTextEx(gui_font, label_string, font_size, font_spacing)
                 rl.GuiLabel({5, info_panel_pos.y + 25 + 60, str_size.x, 20}, label_string)
 
@@ -1375,14 +1331,15 @@ main :: proc() {
         free_all(context.temp_allocator)
     }
 
-    host.audio_thread_status = .stopped
-    asio.Stop()
-    asio.DisposeBuffers()
-    asio.Exit()
 
-    ma_result = ma.device_stop(&host.audio_device)
-    ma.device_uninit(&host.audio_device)
-    ma.context_uninit(&host.miniaudio_context)
+    // @TODO better cleanup
+    uninit_asio_stream()    
+    host.audio_thread_status = .Uninitialized
+    asio.removeCurrentDriver(asio_backend.drivers)
+
+    // ma_result = ma.device_stop(&host.audio_device)
+    // ma.device_uninit(&host.audio_device)
+    // ma.context_uninit(&host.miniaudio_context)
 
     vst_close_plugin(&host)
 
