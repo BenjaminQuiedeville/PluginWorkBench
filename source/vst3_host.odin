@@ -8,8 +8,11 @@ import "core:dynlib"
 import "core:strings"
 import "core:slice"
 import "core:encoding/uuid"
+import vmem "core:mem/virtual"
 
 import vst3 "../deps/vst3_odin/vst3"
+
+
 
 VST3_Entry_Proc :: proc "system" () -> bool
 VST3_Get_Factory_Proc :: proc "system" () -> ^vst3.IPluginFactory3
@@ -71,7 +74,8 @@ Vst_Host :: struct {
 
 host_query_interface :: proc "system" (this: rawptr, iid: [^]u8, obj: ^rawptr) -> vst3.Result { 
     
-    context = set_odin_context_main_allocator()
+    context = runtime.default_context()
+    context.allocator = vmem.arena_allocator(&plugin_arena)
     
     host_app_uuid, _ := vst3.parse_uuid(vst3.IHostApplication_iid)
     audio_processor_uuid, _ := vst3.parse_uuid(vst3.IAudioProcessor_iid)
@@ -115,7 +119,9 @@ param_value_queue_vtbl := vst3.IParamValueQueueVtbl {
     },
         
     get_point = proc "system" (this: rawptr, index: i32, sample_offset: ^i32, value: ^f64) -> vst3.Result {
-        context = set_odin_context_main_allocator()
+        context = runtime.default_context()
+        context.allocator = vmem.arena_allocator(&plugin_arena)
+        
         param_queue := transmute(^Vst_Value_Queue)this
     
         if index < 0 { return .InvalidArgument }
@@ -268,7 +274,8 @@ vst_host_vtbl := vst3.IHostApplicationVtbl {
     },
 
     create_instance = proc "system" (this: rawptr, class_id: [^]u8, iid: [^]u8, msg: ^rawptr) -> vst3.Result {
-        context = set_odin_context_main_allocator() 
+        context = runtime.default_context()
+        context.allocator = vmem.arena_allocator(&plugin_arena)
                
         // message_iid, _ := vst3.parse_uuid(vst3.IMessage_iid)
         
@@ -287,6 +294,8 @@ vst_host_vtbl := vst3.IHostApplicationVtbl {
 
 
 vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result {
+    
+    context.allocator = vmem.arena_allocator(&plugin_arena)
     
     vst_host := &main_host.vst_host
     vst_host.host_interface.vtbl = &vst_host_vtbl
@@ -400,12 +409,14 @@ vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result 
     return .OK
 }
 
-vst_get_parameter_infos :: proc(host: ^Plugin_Host, allocator := context.allocator) {
+vst_get_parameter_infos :: proc(host: ^Plugin_Host) {
+
+    context.allocator = vmem.arena_allocator(&plugin_arena)
 
     vst_host := &host.vst_host
     num_params := vst_host.editor->get_parameter_count()
     
-    host.parameters = make([]Parameter, num_params, allocator)
+    host.parameters = make([]Parameter, num_params)
 
     for index in 0..<num_params {
         
