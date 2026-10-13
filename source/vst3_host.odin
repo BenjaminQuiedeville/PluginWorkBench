@@ -297,6 +297,8 @@ vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result 
     
     context.allocator = vmem.arena_allocator(&plugin_arena)
     
+    fmt.println("[VST3] - Loading plugin:", plugin_path)
+    
     vst_host := &main_host.vst_host
     vst_host.host_interface.vtbl = &vst_host_vtbl
     // vst_host.connection_point.parent = vst_host
@@ -316,13 +318,13 @@ vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result 
     address, found := dynlib.symbol_address(main_host.dll_handle, "InitDll")
 
     if !found {
-        fmt.println("Procedure address not found")
+        fmt.println("[VST3] - Procedure address not found")
         return .ERROR
     }
     
     init_proc := cast(VST3_Entry_Proc)address
     if !init_proc() {
-        fmt.println("Error during plugin moule init")
+        fmt.println("[VST3] - Error during plugin moule init")
         return .ERROR
     }
     
@@ -330,7 +332,7 @@ vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result 
     address, found = dynlib.symbol_address(main_host.dll_handle, "GetPluginFactory")
 
     if !found {
-        fmt.println("Procedure address not found")
+        fmt.println("[VST3] - Procedure address not found")
         return .ERROR
     }
     
@@ -339,7 +341,7 @@ vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result 
     defer vst_factory->release()
     
     if vst_factory == nil {
-        fmt.println("Error retreiving VST factory")
+        fmt.println("[VST3] - Error retreiving VST factory")
         return .ERROR
     }
     
@@ -390,12 +392,12 @@ vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result 
     result = vst_host.component->query_interface(raw_data(connection_point_iid[:]), 
                                                  transmute(^rawptr)&vst_host.connection_point.plugin_component)
     
-    if result != .Ok { fmt.println("Vst Connection Point: Could not fetch interface of component") }
+    if result != .Ok { fmt.println("[VST3] - Vst Connection Point: Could not fetch interface of component") }
     
     result = vst_host.editor->query_interface(raw_data(connection_point_iid[:]), 
                                                         transmute(^rawptr)&vst_host.connection_point.plugin_editor)
 
-    if result != .Ok { fmt.println("Vst Connection Point: Could not fetch interface of editor") }
+    if result != .Ok { fmt.println("[VST3] - Vst Connection Point: Could not fetch interface of editor") }
     
     
     if (vst_host.connection_point.plugin_editor != nil 
@@ -405,7 +407,8 @@ vst_load_plugin :: proc(main_host: ^Plugin_Host, plugin_path: string) -> Result 
         vst_host.connection_point.is_connected = true
         assert(result == .Ok)
     }
-    
+ 
+    fmt.println("[VST3] - Loaded with success!")   
     return .OK
 }
 
@@ -443,6 +446,8 @@ vst_update_processing_setup :: proc(vst_host: ^Vst_Host, samplerate: f64, buffer
 
 vst_prepare_plugin_process :: proc(vst_host: ^Vst_Host, samplerate: f64, buffer_size: i32) {
 
+    fmt.printfln("[VST3] - Setup plugin process for %f Hz and %d sp", samplerate, buffer_size)
+
     result: vst3.Result
 
     process_setup := vst3.ProcessSetup { process_mode = i32(vst3.ProcessMode.Realtime), 
@@ -475,6 +480,8 @@ vst_prepare_plugin_process :: proc(vst_host: ^Vst_Host, samplerate: f64, buffer_
 
 
 vst_close_plugin :: proc(main_host: ^Plugin_Host) {
+    
+    fmt.println("[VST3] - Closing plugin")
 
     vst_host := &main_host.vst_host
 

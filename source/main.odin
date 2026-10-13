@@ -186,8 +186,8 @@ main_arena: vmem.Arena
 plugin_arena: vmem.Arena
 asio_arena: vmem.Arena
 sample_display_arena: vmem.Arena
-scope_arena: vmem.Arena
-fft_arena: vmem.Arena
+scope_display_arena: vmem.Arena
+dft_display_arena: vmem.Arena
 spectrogram_arena: vmem.Arena
 
 
@@ -275,7 +275,7 @@ main_audio_procedure :: proc(host: ^Plugin_Host, nsamples: u32) {
     }
 
 
-    when false {
+    when true {
         frames_decoded: u64
 
         if audio_file_status == .RequestRewind {
@@ -482,7 +482,7 @@ process_asio_message :: proc "c" (selector: asio.MessageSelector, value: c.long,
         case .EngineVersion: { return 2 }
         case .ResetRequest: {
 
-            uninit_asio_stream()
+            terminate_asio_stream()
             init_asio_stream(asio_backend.host, asio_backend.samplerate)
             asio.Start()
 
@@ -676,16 +676,18 @@ init_asio_stream :: proc(host: ^Plugin_Host, wanted_samplerate: f64) -> bool {
 
     fmt.printfln("[ASIO] - Input/Output ASIO latency: %d/%d samples", asio_backend.input_latency, asio_backend.output_latency)
 
-    fmt.println("[ASIO] - Successfully init", asio_backend.driver_names[asio_backend.driver_index])
+    fmt.println("[ASIO] - Init with success!")
 
     return true
 }
 
-uninit_asio_stream :: proc() {
+terminate_asio_stream :: proc() {
 
     stop_asio_stream()
     asio.DisposeBuffers()
     asio.Exit()
+    
+    fmt.println("[ASIO] - Terminated ASIO stream")
 
     vmem.arena_free_all(&asio_arena)
 }
@@ -728,7 +730,7 @@ stop_asio_stream :: proc() -> bool {
 
 Command_Line_Arguments :: struct {
     plugin_path: string          `args:"name=plugin" usage:"The plugin do open"`,
-    test_audio_file_path: string `args:"name=audio-file" usage:"The audio file to use with the plugin"`,
+    // test_audio_file_path: string `args:"name=audio-file" usage:"The audio file to use with the plugin"`,
     run_audio: bool              `args:"name=run-audio" usage:"Sets the audio processing to begin directly"`,
     show_plugin_gui: bool        `args:"name=show-plugin-gui" usage: "To automaticaly show the plugin gui"`,
 }
@@ -747,8 +749,8 @@ main :: proc() {
     arena_error += vmem.arena_init_growing(&plugin_arena)
     arena_error += vmem.arena_init_growing(&asio_arena)
     arena_error += vmem.arena_init_growing(&sample_display_arena)
-    arena_error += vmem.arena_init_growing(&scope_arena)
-    arena_error += vmem.arena_init_growing(&fft_arena)
+    arena_error += vmem.arena_init_growing(&scope_display_arena)
+    arena_error += vmem.arena_init_growing(&dft_display_arena)
     arena_error += vmem.arena_init_growing(&spectrogram_arena)
 
     if arena_error != .None {
@@ -760,8 +762,8 @@ main :: proc() {
         vmem.arena_destroy(&plugin_arena)
         vmem.arena_destroy(&asio_arena)
         vmem.arena_destroy(&sample_display_arena)
-        vmem.arena_destroy(&scope_arena)
-        vmem.arena_destroy(&fft_arena)
+        vmem.arena_destroy(&scope_display_arena)
+        vmem.arena_destroy(&dft_display_arena)
         vmem.arena_destroy(&spectrogram_arena)
     }
 
@@ -772,13 +774,12 @@ main :: proc() {
 
     flags.write_usage(os.to_stream(os.stdout), Command_Line_Arguments)
 
+    plugin_path := arguments.plugin_path
+    test_audio_filepath := "test_files/opeth.wav"
+    plugin_extension := ""
 
     fmt.println("plugin_path: ", arguments.plugin_path)
-    fmt.println("audio-file: ", arguments.test_audio_file_path)
-
-    plugin_path := arguments.plugin_path
-    test_audio_filepath := arguments.test_audio_file_path
-    plugin_extension := ""
+    fmt.println("audio-file: ", test_audio_filepath)    
 
     dir, plugin_filename := os.split_path(plugin_path)
     plugin_filename, plugin_extension = os.split_filename(plugin_filename)
@@ -847,8 +848,6 @@ main :: proc() {
     // miniaudio init
     ma_result: ma.result
 
-
-
     miniaudio_backends := []ma.backend { .wasapi, .jack, .dsound, .winmm  }
     host.miniaudio_context_config = ma.context_config_init()
     // context_config.custom.onContextInit = init_asio_backend_context
@@ -864,30 +863,14 @@ main :: proc() {
     }
 
     #partial switch host.miniaudio_context.backend {
-        case .wasapi: {
-            host.audio_device_list[host.num_audio_devices] = "Wasapi"
-            host.num_audio_devices += 1
-        }
-        case .dsound: {
-            host.audio_device_list[host.num_audio_devices] = "Direct Sound"
-            host.num_audio_devices += 1
-        }
-        case .jack: {
-            host.audio_device_list[host.num_audio_devices] = "Jack"
-            host.num_audio_devices += 1
-        }
-        case .winmm: {
-            host.audio_device_list[host.num_audio_devices] = "Winmm"
-            host.num_audio_devices += 1
-        }
-        case .coreaudio: {
-            host.audio_device_list[host.num_audio_devices] = "Core Audio"
-            host.num_audio_devices += 1
-        }
-        case: {
-            panic("[Miniaudio] - Unsupported backend")
-        }
+        case .wasapi:    { host.audio_device_list[host.num_audio_devices] = "Wasapi" }
+        case .dsound:    { host.audio_device_list[host.num_audio_devices] = "Direct Sound" }
+        case .jack:      { host.audio_device_list[host.num_audio_devices] = "Jack" }
+        case .winmm:     { host.audio_device_list[host.num_audio_devices] = "Winmm" }
+        case .coreaudio: { host.audio_device_list[host.num_audio_devices] = "Core Audio" }
+        case:            { panic("[Miniaudio] - Unsupported backend") }
     }
+    host.num_audio_devices += 1
 
 
     fmt.printfln("\n----- Found %d audio devices -----", host.num_audio_devices)
@@ -908,7 +891,7 @@ main :: proc() {
                     host.audio_thread_status = .Stopped
 
                     if !driver_init {
-                        uninit_asio_stream()
+                        terminate_asio_stream()
                         asio.removeCurrentDriver(asio_backend.drivers)
                         driver_loaded = false
                     }
@@ -974,6 +957,17 @@ main :: proc() {
         ma.decoder_read_pcm_frames(&host.wav_decoder, raw_data(host.input_sample_buffer), audio_file_length, &nframes_read)
         assert(nframes_read == audio_file_length)
         ma.decoder_seek_to_pcm_frame(&host.wav_decoder, 0)
+        
+        norm_value: f32
+    
+        for sample in host.input_sample_buffer {
+            norm_value = max(norm_value, abs(sample))
+        }
+        
+        norm_value = 1/norm_value
+        for &sample in host.input_sample_buffer {
+            sample *= norm_value
+        }        
     }
 
 
@@ -987,33 +981,21 @@ main :: proc() {
     vst_prepare_plugin_process(&host.vst_host, host.samplerate, i32(host.buffer_size))
     vst_get_parameter_infos(&host)
 
-    num_params := host.vst_host.editor->get_parameter_count()
-    for index in 0..<num_params {
-        info: vst3.ParameterInfo
-        result := host.vst_host.editor->get_parameter_info(index, &info)
+    // num_params := host.vst_host.editor->get_parameter_count()
+    // for index in 0..<num_params {
+    //     info: vst3.ParameterInfo
+    //     result := host.vst_host.editor->get_parameter_info(index, &info)
 
-        fmt.println(info.id, " - ",
-                    u16_array_to_string16(info.title[:]), " - ",
-                    u16_array_to_string16(info.short_title[:]), " - ",
-                    u16_array_to_string16(info.units[:]), " - ",
-                    info.default_normalised_value)
-    }
+    //     fmt.println(info.id, " - ",
+    //                 u16_array_to_string16(info.title[:]), " - ",
+    //                 u16_array_to_string16(info.short_title[:]), " - ",
+    //                 u16_array_to_string16(info.units[:]), " - ",
+    //                 info.default_normalised_value)
+    // }
 
     host.audio_file_status = .Stopped
     // ma.device_start(&host.audio_device)
     // host.audio_thread_status = .started
-
-
-    // gui state variables
-
-    /*
-    définir dans des variables les positions dont on a besoin pour calculer des positions relatives
-    si une position n'est pas utilisée comme réféence pour une autre position -> inline
-    ne pas forcément faire des structs pour les states récurrents
-    sauf si j'ai besoin de factoriser certaines fonctions du gui dans des fonctions, là peut etre faire des structs
-
-    */
-
 
 
     // raylib init
@@ -1141,7 +1123,7 @@ main :: proc() {
 
             host.loaded_device_index = selected_audio_device
 
-            uninit_asio_stream()
+            terminate_asio_stream()
             host.audio_thread_status = .Uninitialized
             asio.removeCurrentDriver(asio_backend.drivers)
 
@@ -1260,9 +1242,7 @@ main :: proc() {
                     case 4: {
                         rl.GuiLabel({scopes_pos.x + margin, scopes_pos.y + 30, 100, 20}, "Phase response panel")
                     }
-                    case: {
-                        unreachable()
-                    }
+                    case: { unreachable() }
                 }
 
                 if cast(bool)rl.GuiDropdownBox({scopes_pos.x + 80, scopes_pos.y+2, 150, 20}, "#124#scope;#189#spectrum;#189#spectrogram;#125#freq response;#125#phase response", &scope_box_active, scope_box_edit) {
@@ -1350,40 +1330,48 @@ main :: proc() {
                 switch input_select_active {
                     case 0: {
                         rl.GuiLabel({x_pos, y_pos, 200, 20}, "Dummy audio file name")
-                        rewind_button_pressed = rl.GuiButton({x_pos, y_pos + 30 +5, 100, 30}, "#131#Play")
+                        y_pos += 20.0 + margin
+                        rewind_button_pressed = rl.GuiButton({x_pos, y_pos, 100, 30}, "#131#Play")
+                        y_pos += 30.0 + margin
+                        rewind_button_pressed = rl.GuiButton({x_pos, y_pos, 100, 30}, "#131#Stop")
 
                         x_pos += 300
                         rect_width := i32(panel_rect.width - x_pos + panel_rect.x  - margin)
-                        draw_zone_height := i32(panel_rect.height)-panel_bar_height-2*margin
-                        y_pos := i32(panel_rect.y)+panel_bar_height + margin
-                        rl.DrawRectangleLines(i32(x_pos), y_pos,
-                                         rect_width, draw_zone_height,
-                                         rl.GRAY)
+                        draw_zone_height := f32(panel_rect.height)-panel_bar_height-2*margin
+                        y_pos = f32(panel_rect.y)+panel_bar_height + margin
+                        rl.DrawRectangleLinesEx({x_pos, y_pos, f32(rect_width), draw_zone_height}, 2, rl.GRAY)
 
-                        draw_zone_width := rect_width -10
-                        x_pos += 5
+                        draw_zone_width := rect_width - 10
+                        x_pos += 5.0
                         
                         audio_file_nsamples := len(host.input_sample_buffer)
                         samples_per_pixel := audio_file_nsamples/int(draw_zone_width)
                         
-                        pixels_per_tick := cast(int)(f64(draw_zone_width)/(f64(audio_file_nsamples)/host.samplerate))
+                        pixels_per_tick := cast(i32)(f64(draw_zone_width)*host.samplerate/f64(audio_file_nsamples))
+                        
 
-                        for pixel_index in 0..<draw_zone_width
-                        {
+                        for pixel_index in 0..<draw_zone_width {
                             samples := host.input_sample_buffer[int(pixel_index)*samples_per_pixel:][:samples_per_pixel]
 
                             value_to_display := buffer_abs_average(samples)
-                            value_to_display *= f32(draw_zone_height)
+                            value_to_display *= draw_zone_height
                             
-                            if pixel_index % i32(pixels_per_tick) == 0 {
-                                rl.DrawLineV({x_pos + f32(pixel_index), f32(y_pos)}, 
-                                             {x_pos + f32(pixel_index), f32(y_pos + draw_zone_height)}, rl.LIGHTGRAY)
+                            if pixel_index % pixels_per_tick == 0 {
+                                rl.DrawLineV({x_pos + f32(pixel_index), y_pos}, 
+                                             {x_pos + f32(pixel_index), y_pos + draw_zone_height}, rl.LIGHTGRAY)
                             }
                             
-                            startPos := [2]f32 { x_pos + f32(pixel_index), f32(y_pos + draw_zone_height/2) + value_to_display }
-                            endPos := [2]f32 { x_pos + f32(pixel_index), f32(y_pos + draw_zone_height/2) - value_to_display }
+                            startPos := [2]f32 { x_pos + f32(pixel_index), y_pos + draw_zone_height*0.5 + value_to_display }
+                            endPos   := [2]f32 { x_pos + f32(pixel_index), y_pos + draw_zone_height*0.5 - value_to_display }
                             rl.DrawLineEx(startPos, endPos, 1, rl.SKYBLUE)
                         }
+                        
+                        playhead_position: u64
+                        ma.decoder_get_cursor_in_pcm_frames(&host.wav_decoder, &playhead_position)
+                        
+                        pixel_position := f64(playhead_position)/f64(samples_per_pixel)
+                        rl.DrawLineV({x_pos + f32(pixel_position), y_pos}, 
+                                     {x_pos + f32(pixel_position), y_pos + draw_zone_height}, rl.BLACK)
                     }
                     case 1: {
                         rl.GuiLabel({x_pos, panel_rect.y + panel_bar_height + 30 + margin, 100, 20}, "ADC window")
@@ -1391,9 +1379,7 @@ main :: proc() {
                     case 2: {
                         rl.GuiLabel({x_pos, panel_rect.y + panel_bar_height + 30 + margin, 100, 20}, "Synth window")
                     }
-                    case: {
-                        unreachable()
-                    }
+                    case: { unreachable() }
                 }
 
                 if cast(bool)rl.GuiDropdownBox({panel_rect.x+100, panel_rect.y+2, 80, 20}, "Sample;ADC;Synth", &input_select_active, input_select_edit) {
@@ -1414,7 +1400,7 @@ main :: proc() {
 
 
     // @TODO better cleanup
-    uninit_asio_stream()
+    terminate_asio_stream()
     host.audio_thread_status = .Uninitialized
     asio.removeCurrentDriver(asio_backend.drivers)
 
@@ -1423,5 +1409,4 @@ main :: proc() {
     // ma.context_uninit(&host.miniaudio_context)
 
     vst_close_plugin(&host)
-
 }
