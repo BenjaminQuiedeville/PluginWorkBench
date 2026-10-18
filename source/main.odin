@@ -77,6 +77,7 @@ Plugin_Host :: struct {
 
     audio_thread_status: Audio_Thread_Status,
     audio_file_status: Audio_File_Playback_Status,
+    input_section: Input_Section_Type,
 
     // miniaudio stuff
     miniaudio_context: ma.context_type,
@@ -99,6 +100,18 @@ Plugin_Host :: struct {
     param_event_fifo: EventFIFO,
 
     input_sample_buffer: []f32,
+    
+    audio_scope_buffers: struct {
+        data: [2][]f32,
+        write_index: int,
+        read_index: int,
+    },
+    
+    gui_scope_buffers: struct {
+        data: [2][]f32,
+        write_index: int,
+    },
+    
 }
 
 Info_Panel_State :: struct {}
@@ -173,6 +186,8 @@ Audio_File_Playback_Status :: enum {
     Playing,
     RequestRewind
 }
+
+Input_Section_Type :: enum i32 { Sample, ADC, Synth }
 
 Plugin_Type :: enum {
     Vst,
@@ -268,41 +283,53 @@ miniaudio_data_callback :: proc "c" (device: ^ma.device, output: rawptr, input: 
 main_audio_procedure :: proc(host: ^Plugin_Host, nsamples: u32) {
 
     thread_status := intrin.atomic_load(&host.audio_thread_status)
-    audio_file_status := intrin.atomic_load(&host.audio_file_status)
+    audio_file_status: Audio_File_Playback_Status = intrin.atomic_load(&host.audio_file_status)
 
     if thread_status != .Running {
         return
     }
 
-
-    when true {
-        frames_decoded: u64
-
-        if audio_file_status == .RequestRewind {
-            result := ma.decoder_seek_to_pcm_frame(&host.wav_decoder, 0)
-
-            if result == .SUCCESS {
-                audio_file_status = .Playing
-                intrin.atomic_store(&host.audio_file_status, audio_file_status)
+    switch host.input_section {
+        case .Sample: {
+            frames_decoded: u64    
+    
+            for channel, _ in host.input_buffers {
+                mem.zero_slice(channel)
             }
-        }
-
-        for channel, _ in host.input_buffers {
-            mem.zero_slice(channel)
-        }
-
-        read_frames_result: ma.result
-        if audio_file_status == .Playing {
-            read_frames_result = ma.decoder_read_pcm_frames(&host.wav_decoder, raw_data(host.input_buffers[0]), u64(nsamples), &frames_decoded)
-        }
-
-        if read_frames_result == .AT_END {
+            
+            switch audio_file_status {
+                case .Stopped: {
+                    result := ma.decoder_seek_to_pcm_frame(&host.wav_decoder, 0)            
+                    audio_file_status = .Paused
+                }
+                case .Paused: {
+                    // do nothing, the playback is paused
+                    
+                }
+                case .Playing: {
+                    read_frames_result := ma.decoder_read_pcm_frames(&host.wav_decoder, raw_data(host.input_buffers[0]), u64(nsamples), &frames_decoded)
+                    
+                    if read_frames_result == .AT_END {
+                        audio_file_status = .Stopped
+                        mem.zero_slice(host.input_buffers[0][frames_decoded:])
+                    }
+                }
+                case .RequestRewind: {
+                    result := ma.decoder_seek_to_pcm_frame(&host.wav_decoder, 0)
+        
+                    if result == .SUCCESS {
+                        audio_file_status = .Playing
+                    }
+                }
+                case: { unreachable() }
+            }
+            
             intrin.atomic_store(&host.audio_file_status, audio_file_status)
-            audio_file_status = .Stopped
-            mem.zero_slice(host.input_buffers[0][frames_decoded:])
         }
+        case .ADC: {}
+        case .Synth: {}
+        case: { unimplemented() }
     }
-
 
 
     // input parameter changes
@@ -402,7 +429,31 @@ main_audio_procedure :: proc(host: ^Plugin_Host, nsamples: u32) {
             sample = clamp(sample, -1.0, 1.0)
         }
     }
-
+    
+    { // write into scope buffers
+        write_index := intrin.atomic_load(&host.audio_scope_buffers.write_index)
+        buffers := host.audio_scope_buffers.data
+        
+        if write_index + int(nsamples) < len(buffers[0]) {
+            copy(buffers[0][write_index:][:nsamples], host.output_buffers[0][:nsamples])
+            copy(buffers[1][write_index:][:nsamples], host.output_buffers[1][:nsamples])
+            write_index += int(nsamples)
+        } else {
+            
+            first_copy_nsamples := len(buffers[0]) - write_index
+            copy(buffers[0][write_index:len(buffers[0])], host.output_buffers[0][:first_copy_nsamples])
+            copy(buffers[1][write_index:len(buffers[1])], host.output_buffers[1][:first_copy_nsamples])
+            
+            second_copy_nsamples := int(nsamples) - first_copy_nsamples
+            copy(buffers[0][:second_copy_nsamples], host.output_buffers[0][first_copy_nsamples:])
+            copy(buffers[1][:second_copy_nsamples], host.output_buffers[1][first_copy_nsamples:])
+            
+            write_index = second_copy_nsamples
+        }
+        
+        intrin.atomic_store(&host.audio_scope_buffers.write_index, write_index)
+    
+    }
 }
 
 
@@ -879,7 +930,7 @@ main :: proc() {
         fmt.printfln("%d - %s", name_index, host.audio_device_list[name_index])
     }
 
-    when false { // try to load the drivers in order, keeps the first one as default
+    when true { // try to load the drivers in order, keeps the first one as default
         driver_loaded := false
 
         for driver_index in 0..<host.num_audio_devices {
@@ -998,6 +1049,11 @@ main :: proc() {
     // host.audio_thread_status = .started
 
 
+    host.audio_scope_buffers.data[0] = make([]f32, 48000 * 10)
+    host.audio_scope_buffers.data[1] = make([]f32, 48000 * 10)
+    host.gui_scope_buffers.data[0] = make([]f32, 48000 * 10)
+    host.gui_scope_buffers.data[1] = make([]f32, 48000 * 10)
+
     // raylib init
     rl.InitWindow(800, 600, "PluginWorkBench")
     defer rl.CloseWindow()
@@ -1024,7 +1080,9 @@ main :: proc() {
     rl.GuiSetStyle(.DEFAULT, i32(rl.GuiDefaultProperty.TEXT_SIZE), font_size)
     rl.GuiSetStyle(.DEFAULT, i32(rl.GuiDefaultProperty.TEXT_SPACING), font_spacing)
 
-    rewind_button_pressed: bool
+    play_button_pressed: bool = false
+    stop_button_pressed: bool = false
+    // input_sample_play: bool = false
 
     selected_samplerate: f64 = host.samplerate
     available_samplerates := [3]f64 { 44100.0, 48000.0, 96000.0 }
@@ -1032,10 +1090,7 @@ main :: proc() {
     panel_scroll := rl.Vector2 { 0, 0 }
 
 
-    input_select_active: i32
     input_select_edit: bool = false
-
-
 
 
     //@TODO faire en sorte de sélectionner la samplerate choisie au démarrage
@@ -1070,13 +1125,25 @@ main :: proc() {
 
 
     for !rl.WindowShouldClose() {
-
         // Handle GUI state update and events
-        if rewind_button_pressed {
 
-            intrin.atomic_store(&host.audio_file_status, .RequestRewind)
+        if play_button_pressed {
+            // input_sample_play = !input_sample_play
+            
+            audio_file_status := intrin.atomic_load(&host.audio_file_status)
+            audio_file_status = (audio_file_status == .Playing) ? .Paused : .Playing 
+            intrin.atomic_store(&host.audio_file_status, audio_file_status)
+        }
+        
+        if stop_button_pressed {
+            intrin.atomic_store(&host.audio_file_status, .Stopped)
+            // input_sample_play = false
         }
 
+        // if audio_file_status != .Playing {
+        //     input_sample_play = false
+        // }
+        
         if audio_running_checked != audio_should_run {
             audio_should_run = audio_running_checked
 
@@ -1150,8 +1217,44 @@ main :: proc() {
                     }
                 }
             }
+        }
 
 
+        // gather data from the audio thread
+        if intrin.atomic_load(&host.audio_thread_status) == .Running {
+            audio_write_index := intrin.atomic_load(&host.audio_scope_buffers.write_index)
+            gui_write_index := host.gui_scope_buffers.write_index
+            audio_read_index := host.audio_scope_buffers.read_index
+            audio_buffers := host.audio_scope_buffers.data
+            gui_buffers := host.gui_scope_buffers.data
+            
+            assert(len(audio_buffers[0]) == len(gui_buffers[0]))
+            
+            nsamples := (audio_read_index < audio_write_index 
+                            ? audio_write_index - audio_read_index
+                            : audio_write_index + len(audio_buffers[0]) - audio_read_index)
+            
+            if gui_write_index + nsamples < len(gui_buffers[0]) {
+                copy(gui_buffers[0][gui_write_index:][:nsamples], audio_buffers[0][audio_read_index:][:nsamples])
+                copy(gui_buffers[1][gui_write_index:][:nsamples], audio_buffers[1][audio_read_index:][:nsamples])
+                audio_read_index += nsamples
+                gui_write_index += nsamples
+            } else {
+                
+                first_copy_nsamples := len(audio_buffers[0]) - gui_write_index
+                copy(gui_buffers[0][gui_write_index:], audio_buffers[0][audio_read_index:])
+                copy(gui_buffers[1][gui_write_index:], audio_buffers[1][audio_read_index:])
+                
+                second_copy_nsamples := nsamples - first_copy_nsamples
+                copy(gui_buffers[0][:second_copy_nsamples], audio_buffers[0][:second_copy_nsamples])
+                copy(gui_buffers[1][:second_copy_nsamples], audio_buffers[1][:second_copy_nsamples])
+                
+                audio_read_index = second_copy_nsamples
+                gui_write_index = second_copy_nsamples
+            }
+            
+            host.audio_scope_buffers.read_index = audio_read_index
+            host.gui_scope_buffers.write_index = gui_write_index
         }
 
 
@@ -1163,10 +1266,10 @@ main :: proc() {
             window_width = rl.GetScreenWidth()
             window_height = rl.GetScreenHeight()
 
-            info_panel_pos := rl.Rectangle {0, 0, 500, 200}
-            input_panel_pos := rl.Rectangle {info_panel_pos.width, 0, f32(window_width)-info_panel_pos.width, info_panel_pos.height}
-            plugin_param_pos := rl.Rectangle {0, info_panel_pos.height, 500, f32(window_height)-info_panel_pos.height}
-            scopes_pos := rl.Rectangle {plugin_param_pos.width, plugin_param_pos.y, f32(window_width)-plugin_param_pos.x, f32(window_height)-info_panel_pos.height}
+            info_panel_rect := rl.Rectangle {0, 0, 500, 200}
+            input_panel_rect := rl.Rectangle {info_panel_rect.width, 0, f32(window_width)-info_panel_rect.width, info_panel_rect.height}
+            plugin_param_rect := rl.Rectangle {0, info_panel_rect.height, 500, f32(window_height)-info_panel_rect.height}
+            scopes_rect := rl.Rectangle {plugin_param_rect.width, plugin_param_rect.y, f32(window_width)-plugin_param_rect.x, f32(window_height)-info_panel_rect.height}
 
             rl.ClearBackground(rl.RAYWHITE)
 
@@ -1176,16 +1279,16 @@ main :: proc() {
             margin :: 5
 
             panel_view: rl.Rectangle
-            panel_content_rect := rl.Rectangle {0, 0, plugin_param_pos.width-30, f32(len(host.parameters)*(slider_height + margin))}
+            panel_content_rect := rl.Rectangle {0, 0, plugin_param_rect.width-30, f32(len(host.parameters)*(slider_height + margin))}
 
             {
-                rl.GuiScrollPanel(plugin_param_pos, "Parameter Panel", panel_content_rect, &panel_scroll, &panel_view)
+                rl.GuiScrollPanel(plugin_param_rect, "Parameter Panel", panel_content_rect, &panel_scroll, &panel_view)
 
                 value_text_buffer: [128]u8
                 value_text_buffer_w: [128]u16
 
                 value_text_padding :: 85
-                slider_pos := [2]f32{5.0 + value_text_padding, 30.0}
+                slider_pos := [2]f32{ 5.0 + value_text_padding, 30.0 }
 
                 rl.BeginScissorMode(rect_to_i32_args(panel_view))
                 defer rl.EndScissorMode()
@@ -1198,8 +1301,8 @@ main :: proc() {
                     value_unit_string := rl.TextFormat("%s %s", cast(cstring)raw_data(value_text_buffer[:]), param.unit)
 
                     old_value := param.current_value_norm
-                    rl.GuiSliderBar({plugin_param_pos.x + panel_scroll.x + slider_pos.x,
-                                    plugin_param_pos.y + panel_scroll.y + slider_pos.y,
+                    rl.GuiSliderBar({plugin_param_rect.x + panel_scroll.x + slider_pos.x,
+                                    plugin_param_rect.y + panel_scroll.y + slider_pos.y,
                                     200, 20},
                                     value_unit_string,
                                     param.label, &param.current_value_norm, 0.0, 1.0)
@@ -1223,37 +1326,114 @@ main :: proc() {
                 }
             }
 
-            {
-                rl.GuiPanel(scopes_pos, "scopes")
+            rl.GuiPanel(scopes_rect, "Scopes")
 
-                switch scope_box_active {
-                    case 0: {
-                        rl.GuiLabel({scopes_pos.x + margin, scopes_pos.y + 30, 100, 20}, "Scope panel")
+            switch scope_box_active {
+                case 0: {
+                    
+                    x_pos: f32 = scopes_rect.x + margin
+                    y_pos: f32 = scopes_rect.y + panel_bar_height + margin
+                
+                    @static scope_length: f32
+                    scope_length_ms := scale(scope_length, 0.0, 1.0, 1.0, 1000, 3.0) 
+                    nsamples := int(scope_length_ms* f32(host.samplerate) * 0.001)
+                    @static vertical_max: f32 = 1.0
+                    
+                    rl.GuiLabel({x_pos, y_pos, 100, 20}, "Window length")
+                    y_pos += 20 + margin
+                    rl.GuiSliderBar({x_pos, y_pos, 100, 20}, nil, fmt.ctprint(int(scope_length_ms), "ms"), &scope_length, 0.0, 1.0)
+                    y_pos += 20 + margin
+                    rl.GuiLabel({x_pos, y_pos, 100, 20}, "Vertical zoom")
+                    y_pos += 20 + margin
+                    rl.GuiSliderBar({x_pos, y_pos, 100, 20}, nil, fmt.ctprintf("%.2f", vertical_max), &vertical_max, 0.0, 10.0)
+                    
+                    
+                    x_pos += 200 + margin
+                    // y_pos += margin
+                    
+                    draw_rect := rl.Rectangle {x_pos, y_pos, scopes_rect.width - x_pos - margin, scopes_rect.height - panel_bar_height - 2*margin}
+                    
+                    y_pos += draw_rect.height/2
+                    rl.DrawLineEx({x_pos, y_pos}, {x_pos + draw_rect.width, y_pos}, 1, rl.LIGHTGRAY)
+                    
+                    if vertical_max < 1.0 {
+                        rl.DrawLineEx({x_pos, y_pos + vertical_max*draw_rect.height*0.5}, {x_pos + draw_rect.width, y_pos + vertical_max*draw_rect.height*0.5}, 1, rl.LIGHTGRAY)
+                        rl.DrawLineEx({x_pos, y_pos - vertical_max*draw_rect.height*0.5}, {x_pos + draw_rect.width, y_pos - vertical_max*draw_rect.height*0.5}, 1, rl.LIGHTGRAY)
+                    } else {
+                        rl.DrawLineEx({x_pos, y_pos + vertical_max*draw_rect.height*0.05}, {x_pos + draw_rect.width, y_pos + vertical_max*draw_rect.height*0.05}, 1, rl.LIGHTGRAY)
+                        rl.DrawLineEx({x_pos, y_pos - vertical_max*draw_rect.height*0.05}, {x_pos + draw_rect.width, y_pos - vertical_max*draw_rect.height*0.05}, 1, rl.LIGHTGRAY)                    
                     }
-                    case 1: {
-                        rl.GuiLabel({scopes_pos.x + margin, scopes_pos.y + 30, 100, 20}, "FFT panel")
+                
+                    
+                    pixels_per_sample := (draw_rect.width-4)/f32(nsamples)
+                    
+                    buffers := host.gui_scope_buffers.data
+                    write_index := host.gui_scope_buffers.write_index
+                    
+                    begin_index := write_index - nsamples
+                    begin_index = begin_index > 0 ? begin_index : begin_index + len(buffers[0])
+                    
+                    begin_index_incr := wrap_index(begin_index-1, len(buffers[0]))
+                    
+                    for ((math.sign(buffers[0][begin_index_incr]) == -1.0)
+                        && (math.sign(buffers[0][begin_index]) == math.sign(buffers[0][begin_index_incr]))) 
+                    {
+                        begin_index -= 1
+                        begin_index = begin_index > 0 ? begin_index : begin_index + len(buffers[0])
+                        
+                        begin_index_incr = wrap_index(begin_index-1, len(buffers[0]))
                     }
-                    case 2: {
-                        rl.GuiLabel({scopes_pos.x + margin, scopes_pos.y + 30, 100, 20}, "Spectrogram panel")
+                    
+                    x_pos += 2
+                    for frame_index in 0..<nsamples {
+                        
+                        pos1 := f32(frame_index)*pixels_per_sample
+                        pos2 := pos1 + pixels_per_sample
+                        
+                        sample_index: int = begin_index + frame_index
+                        sample_index = sample_index >= 0 ? sample_index : sample_index + len(buffers[0]) 
+                        sample_index = sample_index < len(buffers[0]) ? sample_index : sample_index - len(buffers[0])
+                        
+                        start_pos := [2]f32 { x_pos + f32(pos1), y_pos + buffers[0][sample_index]*draw_rect.height*0.5*vertical_max }
+                        start_pos.y = clamp(start_pos.y, draw_rect.y, draw_rect.y + draw_rect.height)
+                        
+                        end_pos_index := (sample_index+1 < len(buffers[0])) ? sample_index+1 : 0
+                        end_pos   := [2]f32 { x_pos + f32(pos2), y_pos + buffers[0][end_pos_index]*draw_rect.height*0.5*vertical_max }
+                        end_pos.y = clamp(end_pos.y, draw_rect.y, draw_rect.y + draw_rect.height)
+                        rl.DrawLineEx(start_pos, end_pos, 2, rl.SKYBLUE)
                     }
-                    case 3: {
-                        rl.GuiLabel({scopes_pos.x + margin, scopes_pos.y + 30, 100, 20}, "Freq response panel")
-                    }
-                    case 4: {
-                        rl.GuiLabel({scopes_pos.x + margin, scopes_pos.y + 30, 100, 20}, "Phase response panel")
-                    }
-                    case: { unreachable() }
+
+                    rl.DrawRectangleLinesEx(draw_rect, 2, rl.GRAY)
+                
                 }
-
-                if cast(bool)rl.GuiDropdownBox({scopes_pos.x + 80, scopes_pos.y+2, 150, 20}, "#124#scope;#189#spectrum;#189#spectrogram;#125#freq response;#125#phase response", &scope_box_active, scope_box_edit) {
-                    scope_box_edit = !scope_box_edit
+                case 1: {
+                    rl.GuiLabel({scopes_rect.x + margin, scopes_rect.y + 30, 100, 20}, "FFT panel")
                 }
-
+                case 2: {
+                    rl.GuiLabel({scopes_rect.x + margin, scopes_rect.y + 30, 100, 20}, "Spectrogram panel")
+                }
+                case 3: {
+                    rl.GuiLabel({scopes_rect.x + margin, scopes_rect.y + 30, 100, 20}, "Freq response panel")
+                }
+                case 4: {
+                    rl.GuiLabel({scopes_rect.x + margin, scopes_rect.y + 30, 100, 20}, "Phase response panel")
+                }
+                case: { unreachable() }
             }
 
+            if cast(bool)rl.GuiDropdownBox({scopes_rect.x + 80, scopes_rect.y+2, 150, 20}, 
+                                            "#124#Scope;#189#Spectrum;#189#Spectrogram;#125#Freq response;#125#Phase response", 
+                                            &scope_box_active, 
+                                            scope_box_edit) 
+            {
+                scope_box_edit = !scope_box_edit
+            }
+
+        
+
             { // draw master settings window
-                rl.GuiPanel(info_panel_pos, "Infos panel")
-                panel_rect := info_panel_pos
+                rl.GuiPanel(info_panel_rect, "Infos panel")
+                panel_rect := info_panel_rect
                 x_pos: f32 = panel_rect.x + margin
                 y_pos: f32 = panel_rect.y + panel_bar_height
 
@@ -1299,20 +1479,22 @@ main :: proc() {
 
                 y_pos = panel_rect.y + panel_bar_height + margin
                 audio_running_label: cstring = audio_running_checked ? "Audio On" : "Audio Off"
-                rl.GuiCheckBox({info_panel_pos.width - 100, y_pos, 20, 20}, audio_running_label, &audio_running_checked)
+                rl.GuiCheckBox({info_panel_rect.width - 100, y_pos, 20, 20}, audio_running_label, &audio_running_checked)
                 y_pos += 20 + margin
-                rl.GuiCheckBox({info_panel_pos.width - 100, y_pos, 20, 20}, "Show GUI", &show_gui_checked)
+                rl.GuiCheckBox({info_panel_rect.width - 100, y_pos, 20, 20}, "Show GUI", &show_gui_checked)
 
-                if cast(bool)rl.GuiDropdownBox({margin, info_panel_pos.height - 40 , 200-margin, 30}, audio_device_box_text, &selected_audio_device, audio_device_box_edit) {
+                if cast(bool)rl.GuiDropdownBox({margin, info_panel_rect.height - 40 , 200-margin, 30}, audio_device_box_text, &selected_audio_device, audio_device_box_edit) {
                     audio_device_box_edit = !audio_device_box_edit
                 }
 
                 // samplerate dropdown box
 
-                if cast(bool)rl.GuiDropdownBox({220, info_panel_pos.height - 40, 100, 30}, samplerate_box_text, &selected_samplerate_index, samplerate_box_edit) {
+                if cast(bool)rl.GuiDropdownBox({220, info_panel_rect.height - 40, 100, 30}, samplerate_box_text, &selected_samplerate_index, samplerate_box_edit) {
                     samplerate_box_edit = !samplerate_box_edit
                     selected_samplerate = available_samplerates[selected_samplerate_index]
                 }
+                
+                rl.DrawFPS(340, i32(info_panel_rect.height)-40);
                 /* si jechange samplerate {
                     couper proprement l'audio stream,
                     réouvrir un nouvel audio stream avec les nouveaux settings
@@ -1320,72 +1502,77 @@ main :: proc() {
                 */
             }
 
-            { // draw input settings
-                rl.GuiPanel(input_panel_pos, "Input panel")
+            // draw input settings
+            rl.GuiPanel(input_panel_rect, "Input panel")
 
-                panel_rect := input_panel_pos
-                x_pos := panel_rect.x + margin
-                y_pos := panel_rect.y + panel_bar_height
+            panel_rect := input_panel_rect
+            x_pos := panel_rect.x + margin
+            y_pos := panel_rect.y + panel_bar_height
 
-                switch input_select_active {
-                    case 0: {
-                        rl.GuiLabel({x_pos, y_pos, 200, 20}, "Dummy audio file name")
-                        y_pos += 20.0 + margin
-                        rewind_button_pressed = rl.GuiButton({x_pos, y_pos, 100, 30}, "#131#Play")
-                        y_pos += 30.0 + margin
-                        rewind_button_pressed = rl.GuiButton({x_pos, y_pos, 100, 30}, "#131#Stop")
+            switch host.input_section {
+                case .Sample: {
+                    rl.GuiLabel({x_pos, y_pos, 200, 20}, "Dummy audio file name")
+                    y_pos += 20.0 + margin
+                    
+                    audio_file_status := intrin.atomic_load(&host.audio_file_status)
+                    
+                    play_button_label: cstring = (audio_file_status == .Playing) ? "#134#Pause" : "#134#Play"
+                    play_button_pressed = rl.GuiButton({x_pos, y_pos, 100, 30}, play_button_label)
+                    
+                    y_pos += 30.0 + margin
+                    stop_button_pressed = rl.GuiButton({x_pos, y_pos, 100, 30}, "#133#Stop")
 
-                        x_pos += 300
-                        rect_width := i32(panel_rect.width - x_pos + panel_rect.x  - margin)
-                        draw_zone_height := f32(panel_rect.height)-panel_bar_height-2*margin
-                        y_pos = f32(panel_rect.y)+panel_bar_height + margin
-                        rl.DrawRectangleLinesEx({x_pos, y_pos, f32(rect_width), draw_zone_height}, 2, rl.GRAY)
+                    x_pos += 300
+                    rect_width := i32(panel_rect.width - x_pos + panel_rect.x  - margin)
+                    draw_zone_height := f32(panel_rect.height)-panel_bar_height-2*margin
+                    y_pos = f32(panel_rect.y)+panel_bar_height + margin
+                    rl.DrawRectangleLinesEx({x_pos, y_pos, f32(rect_width), draw_zone_height}, 2, rl.GRAY)
 
-                        draw_zone_width := rect_width - 10
-                        x_pos += 5.0
+                    draw_zone_width := rect_width - 10
+                    x_pos += 5.0
+                    
+                    audio_file_nsamples := len(host.input_sample_buffer)
+                    samples_per_pixel := audio_file_nsamples/int(draw_zone_width)
+                    
+                    pixels_per_tick := cast(i32)(f64(draw_zone_width)*host.samplerate/f64(audio_file_nsamples))
+                    
+
+                    for pixel_index in 0..<draw_zone_width {
+                        samples := host.input_sample_buffer[int(pixel_index)*samples_per_pixel:][:samples_per_pixel]
+
+                        value_to_display := buffer_abs_average(samples)
+                        value_to_display *= draw_zone_height
                         
-                        audio_file_nsamples := len(host.input_sample_buffer)
-                        samples_per_pixel := audio_file_nsamples/int(draw_zone_width)
-                        
-                        pixels_per_tick := cast(i32)(f64(draw_zone_width)*host.samplerate/f64(audio_file_nsamples))
-                        
-
-                        for pixel_index in 0..<draw_zone_width {
-                            samples := host.input_sample_buffer[int(pixel_index)*samples_per_pixel:][:samples_per_pixel]
-
-                            value_to_display := buffer_abs_average(samples)
-                            value_to_display *= draw_zone_height
-                            
-                            if pixel_index % pixels_per_tick == 0 {
-                                rl.DrawLineV({x_pos + f32(pixel_index), y_pos}, 
-                                             {x_pos + f32(pixel_index), y_pos + draw_zone_height}, rl.LIGHTGRAY)
-                            }
-                            
-                            startPos := [2]f32 { x_pos + f32(pixel_index), y_pos + draw_zone_height*0.5 + value_to_display }
-                            endPos   := [2]f32 { x_pos + f32(pixel_index), y_pos + draw_zone_height*0.5 - value_to_display }
-                            rl.DrawLineEx(startPos, endPos, 1, rl.SKYBLUE)
+                        if pixel_index % pixels_per_tick == 0 {
+                            rl.DrawLineV({x_pos + f32(pixel_index), y_pos}, 
+                                         {x_pos + f32(pixel_index), y_pos + draw_zone_height}, rl.LIGHTGRAY)
                         }
                         
-                        playhead_position: u64
-                        ma.decoder_get_cursor_in_pcm_frames(&host.wav_decoder, &playhead_position)
-                        
-                        pixel_position := f64(playhead_position)/f64(samples_per_pixel)
-                        rl.DrawLineV({x_pos + f32(pixel_position), y_pos}, 
-                                     {x_pos + f32(pixel_position), y_pos + draw_zone_height}, rl.BLACK)
+                        startPos := [2]f32 { x_pos + f32(pixel_index), y_pos + draw_zone_height*0.5 + value_to_display }
+                        endPos   := [2]f32 { x_pos + f32(pixel_index), y_pos + draw_zone_height*0.5 - value_to_display }
+                        rl.DrawLineEx(startPos, endPos, 1, rl.SKYBLUE)
                     }
-                    case 1: {
-                        rl.GuiLabel({x_pos, panel_rect.y + panel_bar_height + 30 + margin, 100, 20}, "ADC window")
-                    }
-                    case 2: {
-                        rl.GuiLabel({x_pos, panel_rect.y + panel_bar_height + 30 + margin, 100, 20}, "Synth window")
-                    }
-                    case: { unreachable() }
+                    
+                    playhead_position: u64
+                    ma.decoder_get_cursor_in_pcm_frames(&host.wav_decoder, &playhead_position)
+                    
+                    pixel_position := f64(playhead_position)/f64(samples_per_pixel)
+                    rl.DrawLineV({x_pos + f32(pixel_position), y_pos}, 
+                                 {x_pos + f32(pixel_position), y_pos + draw_zone_height}, rl.BLACK)
                 }
-
-                if cast(bool)rl.GuiDropdownBox({panel_rect.x+100, panel_rect.y+2, 80, 20}, "Sample;ADC;Synth", &input_select_active, input_select_edit) {
-                    input_select_edit = !input_select_edit
+                case .ADC: {
+                    rl.GuiLabel({x_pos, panel_rect.y + panel_bar_height + 30 + margin, 100, 20}, "ADC window")
                 }
+                case .Synth: {
+                    rl.GuiLabel({x_pos, panel_rect.y + panel_bar_height + 30 + margin, 100, 20}, "Synth window")
+                }
+                case: { unreachable() }
             }
+
+            if cast(bool)rl.GuiDropdownBox({panel_rect.x+100, panel_rect.y+2, 80, 20}, "Sample;ADC;Synth", transmute(^i32)(&host.input_section), input_select_edit) {
+                input_select_edit = !input_select_edit
+            }
+            
 
             // status_bar_height :: f32(40)
             // status_bar_y :: f32(window_height - status_bar_height)

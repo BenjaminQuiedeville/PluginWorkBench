@@ -58,6 +58,13 @@ rect_to_i32_args :: proc(rect: rl.Rectangle) -> (i32, i32, i32, i32) {
     return i32(rect.x), i32(rect.y), i32(rect.width), i32(rect.height)
 }
 
+wrap_index :: proc(n, max: int) -> int {
+    return cast(int)math.wrap(cast(f64)n, cast(f64)max)
+}
+
+scale :: proc(x, min, max, newmin, newmax, curve: f32) -> f32 {
+    return math.pow((x - min) / (max - min), curve) * (newmax - newmin) + newmin
+}
 
 atodb :: proc(amp: f32) -> f32 {
     return 20.0 * math.log10(amp)
