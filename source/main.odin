@@ -15,6 +15,7 @@ import "core:math"
 import vmem "core:mem/virtual"
 
 import vst3 "../deps/vst3_odin/vst3"
+import pugl "../deps/pugl-odin"
 
 import ma "vendor:miniaudio"
 import rl "vendor:raylib"
@@ -95,6 +96,9 @@ Plugin_Host :: struct {
 
     vst_host: Vst_Host,
     clap_host: Clap_Host,
+
+    gui_world: ^pugl.World,
+    gui_parent_view: ^pugl.View,
 
     parameters: []Parameter,
     param_event_fifo: EventFIFO,
@@ -778,6 +782,23 @@ stop_asio_stream :: proc() -> bool {
     return true
 }
 
+plugin_gui_parent_event_proc :: proc "c" (view: ^pugl.View, event: ^pugl.Event) -> pugl.Status {
+
+    #partial switch event.type {
+        case: {}
+        case .CONFIGURE: {}
+        case .EXPOSE: {}
+        case .REALIZE: {}
+        case .UPDATE: {}
+        case .CLOSE: {}
+        case .KEY_PRESS: {}
+    }
+
+    return .SUCCESS
+}
+
+
+
 
 Command_Line_Arguments :: struct {
     plugin_path: string          `args:"name=plugin" usage:"The plugin do open"`,
@@ -930,7 +951,7 @@ main :: proc() {
         fmt.printfln("%d - %s", name_index, host.audio_device_list[name_index])
     }
 
-    when true { // try to load the drivers in order, keeps the first one as default
+    when false { // try to load the drivers in order, keeps the first one as default
         driver_loaded := false
 
         for driver_index in 0..<host.num_audio_devices {
@@ -1031,6 +1052,33 @@ main :: proc() {
 
     vst_prepare_plugin_process(&host.vst_host, host.samplerate, i32(host.buffer_size))
     vst_get_parameter_infos(&host)
+
+    host.gui_world = pugl.NewWorld(.MODULE, 0)
+    defer pugl.FreeWorld(host.gui_world)
+    
+    pugl.SetWorldHandle(host.gui_world, &host)
+    pugl.SetWorldString(host.gui_world, .CLASS_NAME, "Plugin Window")
+    
+    host.gui_parent_view = pugl.NewView(host.gui_world)
+    defer pugl.FreeView(host.gui_parent_view)
+    
+    pugl.SetEventFunc(host.gui_parent_view, plugin_gui_parent_event_proc)
+    pugl.SetHandle(host.gui_parent_view, &host)
+    
+    pugl.SetBackend(host.gui_parent_view, pugl.GlBackend())
+    pugl.SetViewHint(host.gui_parent_view, .REFRESH_RATE, 60)
+    pugl.SetViewHint(host.gui_parent_view, .CONTEXT_VERSION_MAJOR, 3)
+    pugl.SetViewHint(host.gui_parent_view, .CONTEXT_VERSION_MINOR, 2)
+
+    pugl.SetViewHint(host.gui_parent_view, .DOUBLE_BUFFER, i32(true))
+    pugl.SetViewHint(host.gui_parent_view, .SWAP_INTERVAL, 1)
+    
+
+    // faire pugl.Update dans la boucle raylib
+
+    vst_create_gui(&host)
+
+    // vst_show_gui(&host.vst_host, host.gui_parent_view)
 
     // num_params := host.vst_host.editor->get_parameter_count()
     // for index in 0..<num_params {
@@ -1494,7 +1542,7 @@ main :: proc() {
                     selected_samplerate = available_samplerates[selected_samplerate_index]
                 }
                 
-                rl.DrawFPS(340, i32(info_panel_rect.height)-40);
+                rl.DrawFPS(340, i32(info_panel_rect.height)-40)
                 /* si jechange samplerate {
                     couper proprement l'audio stream,
                     réouvrir un nouvel audio stream avec les nouveaux settings

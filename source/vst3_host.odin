@@ -11,7 +11,7 @@ import "core:encoding/uuid"
 import vmem "core:mem/virtual"
 
 import vst3 "../deps/vst3_odin/vst3"
-
+import pugl "../deps/pugl-odin"
 
 
 VST3_Entry_Proc :: proc "system" () -> bool
@@ -64,6 +64,7 @@ Vst_Host :: struct {
     editor: ^vst3.IEditController,
     component_handler: vst3.IComponentHandler,
 
+    plugin_view: ^vst3.IPlugView,
     connection_point: Vst_Connection_Point,
 
     plugin_class_infos: []vst3.PClassInfo,
@@ -501,4 +502,50 @@ vst_close_plugin :: proc(main_host: ^Plugin_Host) {
     vst_host.component->release()
 
     dynlib.unload_library(main_host.dll_handle)
+}
+
+
+vst_create_gui :: proc(host: ^Plugin_Host) -> bool {
+
+    plugin_view := host.vst_host.editor->create_view("editor")
+    if plugin_view == nil { return false }
+    
+    host.vst_host.plugin_view = plugin_view
+
+    if plugin_view->is_platform_type_supported(vst3.kPlatformTypeHWND) != .Ok {
+        panic("[VST3] - Platform not supported yet")
+    }
+    
+    return true
+}
+
+vst_destroy_gui :: proc(host: ^Plugin_Host) {
+
+}
+
+vst_show_gui :: proc(vst_host: ^Vst_Host, parent_view: ^pugl.View) -> bool {
+    
+    plugin_view_rect: vst3.ViewRect
+    vst_host.plugin_view->get_size(&plugin_view_rect)
+
+    pugl.SetPositionHint(parent_view, .DEFAULT_POSITION, 0, 0)
+    pugl.SetSizeHint(parent_view, .DEFAULT_SIZE, 
+                     u32(plugin_view_rect.right-plugin_view_rect.left),
+                     u32(plugin_view_rect.bottom - plugin_view_rect.top))
+    
+    
+    if realize_error := pugl.Realize(parent_view); realize_error != .SUCCESS {
+        return false
+    }
+    
+    pugl.Show(parent_view, .RAISE)
+    
+    parent_handle := pugl.GetNativeView(parent_view)
+    
+    
+    if vst_host.plugin_view->attached(parent_handle, vst3.kPlatformTypeHWND) != .Ok {
+        return false
+    }
+    
+    return true
 }
