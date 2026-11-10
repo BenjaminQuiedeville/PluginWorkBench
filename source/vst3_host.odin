@@ -521,17 +521,21 @@ vst_create_gui :: proc(host: ^Plugin_Host) -> bool {
 
 vst_destroy_gui :: proc(host: ^Plugin_Host) {
 
+    if host.vst_host.plugin_view->removed() != .Ok {
+        panic("[VST3] - Fail during plugin view removed")
+    }
 }
 
-vst_show_gui :: proc(vst_host: ^Vst_Host, parent_view: ^pugl.View) -> bool {
+vst_show_gui :: proc(host: ^Plugin_Host, parent_view: ^pugl.View) -> bool {
     
     plugin_view_rect: vst3.ViewRect
-    vst_host.plugin_view->get_size(&plugin_view_rect)
+    host.vst_host.plugin_view->get_size(&plugin_view_rect)
+
+    host.gui.width = u32(plugin_view_rect.right-plugin_view_rect.left)
+    host.gui.height = u32(plugin_view_rect.bottom - plugin_view_rect.top)
 
     pugl.SetPositionHint(parent_view, .DEFAULT_POSITION, 0, 0)
-    pugl.SetSizeHint(parent_view, .DEFAULT_SIZE, 
-                     u32(plugin_view_rect.right-plugin_view_rect.left),
-                     u32(plugin_view_rect.bottom - plugin_view_rect.top))
+    pugl.SetSizeHint(parent_view, .DEFAULT_SIZE, host.gui.width, host.gui.height)
     
     
     if realize_error := pugl.Realize(parent_view); realize_error != .SUCCESS {
@@ -543,9 +547,14 @@ vst_show_gui :: proc(vst_host: ^Vst_Host, parent_view: ^pugl.View) -> bool {
     parent_handle := pugl.GetNativeView(parent_view)
     
     
-    if vst_host.plugin_view->attached(parent_handle, vst3.kPlatformTypeHWND) != .Ok {
+    if host.vst_host.plugin_view->attached(parent_handle, vst3.kPlatformTypeHWND) != .Ok {
         return false
     }
     
     return true
+}
+
+vst_hide_gui :: proc(host: ^Plugin_Host) -> bool {
+    
+    return false
 }

@@ -97,9 +97,12 @@ Plugin_Host :: struct {
     vst_host: Vst_Host,
     clap_host: Clap_Host,
 
-    gui_world: ^pugl.World,
-    gui_parent_view: ^pugl.View,
-
+    gui: struct {
+        world: ^pugl.World,
+        parent_view: ^pugl.View,
+        width, height: u32,
+    },
+    
     parameters: []Parameter,
     param_event_fifo: EventFIFO,
 
@@ -1053,32 +1056,30 @@ main :: proc() {
     vst_prepare_plugin_process(&host.vst_host, host.samplerate, i32(host.buffer_size))
     vst_get_parameter_infos(&host)
 
-    host.gui_world = pugl.NewWorld(.MODULE, 0)
-    defer pugl.FreeWorld(host.gui_world)
+    host.gui.world = pugl.NewWorld(.MODULE, 0)
+    defer pugl.FreeWorld(host.gui.world)
     
-    pugl.SetWorldHandle(host.gui_world, &host)
-    pugl.SetWorldString(host.gui_world, .CLASS_NAME, "Plugin Window")
+    pugl.SetWorldHandle(host.gui.world, &host)
+    pugl.SetWorldString(host.gui.world, .CLASS_NAME, "Plugin Window")
     
-    host.gui_parent_view = pugl.NewView(host.gui_world)
-    defer pugl.FreeView(host.gui_parent_view)
+    host.gui.parent_view = pugl.NewView(host.gui.world)
+    defer pugl.FreeView(host.gui.parent_view)
     
-    pugl.SetEventFunc(host.gui_parent_view, plugin_gui_parent_event_proc)
-    pugl.SetHandle(host.gui_parent_view, &host)
+    pugl.SetEventFunc(host.gui.parent_view, plugin_gui_parent_event_proc)
+    pugl.SetHandle(host.gui.parent_view, &host)
     
-    pugl.SetBackend(host.gui_parent_view, pugl.GlBackend())
-    pugl.SetViewHint(host.gui_parent_view, .REFRESH_RATE, 60)
-    pugl.SetViewHint(host.gui_parent_view, .CONTEXT_VERSION_MAJOR, 3)
-    pugl.SetViewHint(host.gui_parent_view, .CONTEXT_VERSION_MINOR, 2)
+    pugl.SetBackend(host.gui.parent_view, pugl.GlBackend())
+    pugl.SetViewHint(host.gui.parent_view, .REFRESH_RATE, 60)
+    pugl.SetViewHint(host.gui.parent_view, .CONTEXT_VERSION_MAJOR, 3)
+    pugl.SetViewHint(host.gui.parent_view, .CONTEXT_VERSION_MINOR, 2)
 
-    pugl.SetViewHint(host.gui_parent_view, .DOUBLE_BUFFER, i32(true))
-    pugl.SetViewHint(host.gui_parent_view, .SWAP_INTERVAL, 1)
+    pugl.SetViewHint(host.gui.parent_view, .DOUBLE_BUFFER, i32(true))
+    pugl.SetViewHint(host.gui.parent_view, .SWAP_INTERVAL, 1)
     
 
     // faire pugl.Update dans la boucle raylib
 
     vst_create_gui(&host)
-
-    // vst_show_gui(&host.vst_host, host.gui_parent_view)
 
     // num_params := host.vst_host.editor->get_parameter_count()
     // for index in 0..<num_params {
@@ -1267,6 +1268,19 @@ main :: proc() {
             }
         }
 
+        if show_gui_checked != should_show_gui {
+            should_show_gui = show_gui_checked
+            
+            if should_show_gui {
+                if !vst_show_gui(&host, host.gui.parent_view) {
+                    fmt.println("[VST3] - Error during vst_show_gui")
+                }
+            } else {
+                vst_hide_gui(&host)
+            }
+        
+        }
+    
 
         // gather data from the audio thread
         if intrin.atomic_load(&host.audio_thread_status) == .Running {
